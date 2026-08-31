@@ -1,0 +1,23 @@
+! Rendered by the interop harness from an frrConfig; see frr.go.
+!
+! Deliberate stances baked in rather than rediscovered per scenario:
+! - Every peer names its local-address explicitly, matching the
+!   library's own DialUDP(local, peer) shape and keeping bfdd off the
+!   wildcard.
+! - Intervals and multipliers are always explicit, so a scenario's
+!   timing assertions never depend on bfdd's defaults.
+frr defaults traditional
+hostname frr-interop
+log stdout
+!
+bfd
+{{- range .Peers}}
+ peer {{.Addr}} local-address {{.Local}}
+  detect-multiplier {{.Multiplier}}
+  receive-interval {{.RXMS}}
+  transmit-interval {{.TXMS}}
+ exit
+{{- end}}
+exit
+!
+service integrated-vtysh-config
