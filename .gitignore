@@ -1,1 +1,4 @@
 bfd.test
+
+# nix-direnv's dev shell cache.
+/.direnv/
