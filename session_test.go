@@ -451,6 +451,45 @@ func TestSessionSlowStart(t *testing.T) {
 	})
 }
 
+// TestSessionTransmitSpeedup verifies that a shrunken transmit interval
+// takes effect on the very next transmission. Reaching Up lifts the
+// slow-start clamp, and a peer may lower its receive requirement at any
+// time; a transmit timer still armed with the old spacing leaves one
+// stale gap that can outlast the peer's now-faster detection time. A live
+// FRR peer caught the stale gap as a single flap right after reaching Up.
+func TestSessionTransmitSpeedup(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		r := newSessionRig(t, Config{DesiredMinTX: 50 * time.Millisecond})
+
+		// The handshake completes well inside the initial one second
+		// slow-start arm, learning the peer's 300ms requirement.
+		r.up()
+
+		// The first periodic Up packet arrives at the negotiated 300ms
+		// spacing. The stale arm would hold it until one second: past the
+		// 900ms detection time a peer computes from these intervals.
+		start := time.Now()
+		r.script.nextState(StateUp)
+		if got, want := time.Since(start), 300*time.Millisecond; got != want {
+			t.Fatalf("unexpected first Up transmit delay: got %s, want %s", got, want)
+		}
+
+		// The peer lowers its receive requirement below our desire; the
+		// next packet honors the faster spacing immediately too.
+		start = time.Now()
+		p := r.script.packet(StateUp)
+		p.RequiredMinRX = 50 * time.Millisecond
+		r.script.write(p)
+
+		r.script.read()
+		if got, want := time.Since(start), 50*time.Millisecond; got != want {
+			t.Fatalf("unexpected lowered transmit delay: got %s, want %s", got, want)
+		}
+	})
+}
+
 // TestSessionCancelFarewell verifies teardown from Up: cancellation is a
 // Down like any other, firing OnDown with the administrative diagnostic,
 // and transmits an AdminDown farewell so the peer learns this was

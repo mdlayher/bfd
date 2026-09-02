@@ -148,6 +148,31 @@ func TestFRRDetectionExpired(t *testing.T) {
 	f.awaitStatus(t, host, "up")
 }
 
+// Scenario 5: holding Up. The packets just after reaching Up are the
+// easiest to mistime: reaching Up lifts the slow-start clamp, and a
+// transmit timer still armed with the old one second spacing leaves a
+// gap that overshoots FRR's 900ms detection time, flapping the session
+// exactly once before it self-heals. Hold for several detection times
+// and require silence from OnDown, with FRR still up at the end.
+func TestFRRHoldAfterUp(t *testing.T) {
+	f, host := startFRRPeer(t, false)
+
+	_, upC, downC := runSession(t, host, f.Addr)
+	await(t, upC, "OnUp")
+	f.awaitStatus(t, host, "up")
+
+	// An absence has no signal to await, so the hold is wall-clock time
+	// against the oracle's real timers, sized at several detection
+	// times: the same documented exception as poll.
+	select {
+	case d := <-downC:
+		t.Fatalf("session flapped after reaching Up: %+v", d)
+	case <-time.After(4 * time.Second):
+	}
+
+	f.awaitStatus(t, host, "up")
+}
+
 // startFRRPeer starts an FRR instance configured with the harness
 // timing fixture for one single-hop peer, returning it and the host
 // address the library session uses for the chosen family.

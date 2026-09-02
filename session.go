@@ -282,7 +282,18 @@ func (s *Session) Run(ctx context.Context) error {
 			s.transition(StateDown, DiagControlDetectionTimeExpired, nil)
 
 		case p := <-packetC:
+			// A packet can shrink the transmit interval: the peer lowering
+			// its receive requirement, or a transition to Up lifting the
+			// slow-start clamp. The pending timer still holds the old,
+			// slower spacing, so re-arm it or one stale gap outlasts the
+			// peer's now-faster detection time (RFC 5880, sections 6.8.3
+			// and 6.8.7). A grown interval keeps the pending fire: one
+			// early packet is harmless.
+			iv := s.txIntervalBase()
 			s.receive(p, detectT)
+			if s.txIntervalBase() < iv {
+				txT.Reset(s.txInterval())
+			}
 		}
 	}
 }
@@ -440,12 +451,19 @@ func (s *Session) desiredMinTX() time.Duration {
 	return s.cfg.DesiredMinTX
 }
 
+// txIntervalBase is the unjittered periodic transmit interval: the slower
+// of this side's desire and the peer's requirement (RFC 5880, section
+// 6.8.7).
+func (s *Session) txIntervalBase() time.Duration {
+	return max(s.desiredMinTX(), s.remoteMinRX)
+}
+
 // txInterval is the jittered pause before the next periodic transmission:
-// the slower of this side's desire and the peer's requirement, scaled to
-// 75-100% so peers do not synchronize, and to 75-90% when a single packet
-// is the whole detection budget (RFC 5880, section 6.8.7).
+// txIntervalBase scaled to 75-100% so peers do not synchronize, and to
+// 75-90% when a single packet is the whole detection budget (RFC 5880,
+// section 6.8.7).
 func (s *Session) txInterval() time.Duration {
-	iv := max(s.desiredMinTX(), s.remoteMinRX)
+	iv := s.txIntervalBase()
 	span := 0.25
 	if s.cfg.DetectMultiplier == 1 {
 		span = 0.15
