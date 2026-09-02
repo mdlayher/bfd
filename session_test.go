@@ -201,8 +201,9 @@ func TestSessionDetectMultiplierOneInterval(t *testing.T) {
 }
 
 // TestSessionPollFinal verifies that a Poll is answered immediately with
-// Final, outside the periodic cadence, before the packet's own state change
-// is applied.
+// Final, outside the periodic cadence, and that the answer is the last step
+// of reception (RFC 5880, section 6.8.6): the Final reflects the state
+// change the same packet caused.
 func TestSessionPollFinal(t *testing.T) {
 	t.Parallel()
 
@@ -213,11 +214,12 @@ func TestSessionPollFinal(t *testing.T) {
 		p.YourDiscriminator = 0
 		p.Poll = true
 		r.script.write(p)
+		r.wantTransition(StateDown, StateInit)
 
 		want := &ControlPacket{
-			// The answer reflects the state before the transition the same
-			// packet causes, and already echoes the just-learned peer.
-			State:             StateDown,
+			// The answer reflects the transition the same packet caused,
+			// and already echoes the just-learned peer.
+			State:             StateInit,
 			Final:             true,
 			DetectMultiplier:  defaultDetectMultiplier,
 			MyDiscriminator:   r.script.discr,
@@ -229,8 +231,6 @@ func TestSessionPollFinal(t *testing.T) {
 		if d := diff(t, want, r.script.read()); d != "" {
 			t.Fatalf("unexpected Final packet (-want +got):\n%s", d)
 		}
-
-		r.wantTransition(StateDown, StateInit)
 	})
 }
 

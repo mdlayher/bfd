@@ -353,12 +353,6 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 	s.remoteDesiredTX = p.DesiredMinTX
 	s.remoteDetectMultiplier = p.DetectMultiplier
 
-	// A Poll is answered immediately with Final, outside the periodic
-	// cadence (RFC 5880, section 6.8.7).
-	if p.Poll {
-		s.transmit(true)
-	}
-
 	switch {
 	case p.State == StateAdminDown:
 		if s.state != StateDown {
@@ -381,6 +375,14 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 		detectT.Reset(time.Duration(s.remoteDetectMultiplier) * max(s.cfg.RequiredMinRX, s.remoteDesiredTX))
 	} else {
 		detectT.Stop()
+	}
+
+	// A Poll is answered immediately with Final, outside the periodic
+	// cadence (RFC 5880, section 6.8.7). RFC 5880, section 6.8.6 makes
+	// this the last step of reception, so the Final reflects any state
+	// change the same packet caused.
+	if p.Poll {
+		s.transmit(true)
 	}
 }
 
