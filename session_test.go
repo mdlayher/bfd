@@ -1,6 +1,7 @@
 package bfd
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -82,6 +83,18 @@ func TestNewSessionErrors(t *testing.T) {
 		{
 			name: "oversized required",
 			cfg:  Config{RequiredMinRX: (math.MaxUint32 + 1) * time.Microsecond},
+		},
+		{
+			name: "auth unsupported type",
+			cfg:  Config{Auth: &AuthConfig{Type: AuthTypeKeyedSHA1, Key: []byte("secret")}},
+		},
+		{
+			name: "auth empty key",
+			cfg:  Config{Auth: &AuthConfig{Type: AuthTypeSimplePassword}},
+		},
+		{
+			name: "auth oversize key",
+			cfg:  Config{Auth: &AuthConfig{Type: AuthTypeSimplePassword, Key: bytes.Repeat([]byte{'a'}, 17)}},
 		},
 	}
 
@@ -175,6 +188,66 @@ func TestSessionUpFromInit(t *testing.T) {
 		r.script.write(r.script.packet(StateInit))
 		r.wantTransition(StateDown, StateUp)
 		recv(t, r.upC, "OnUp")
+	})
+}
+
+// TestSessionAuthSimplePassword verifies an authenticated handshake: the
+// session stamps every packet with the Simple Password section, and an
+// authenticated peer reaches Up.
+func TestSessionAuthSimplePassword(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		key := []byte("hunter2")
+		r := newSessionRig(t, Config{
+			Auth: &AuthConfig{Type: AuthTypeSimplePassword, KeyID: 3, Key: key},
+		})
+
+		// The session's own packets carry the configured password.
+		first := r.script.read()
+		want := &AuthSection{Type: AuthTypeSimplePassword, KeyID: 3, Data: key}
+		if d := diff(t, want, first.Auth); d != "" {
+			t.Fatalf("unexpected auth section (-want +got):\n%s", d)
+		}
+
+		// The scripted peer authenticates, and the handshake completes.
+		r.script.writeAuth(StateDown, want, true)
+		r.wantTransition(StateDown, StateInit)
+
+		r.script.writeAuth(StateInit, want, false)
+		r.wantTransition(StateInit, StateUp)
+		recv(t, r.upC, "OnUp")
+	})
+}
+
+// TestSessionAuthRejected verifies the RFC 5880, section 6.8.6 policy: a
+// configured session discards a packet with the wrong password and one with
+// no Authentication Section at all, without touching the state machine.
+func TestSessionAuthRejected(t *testing.T) {
+	t.Parallel()
+
+	synctest.Test(t, func(t *testing.T) {
+		r := newSessionRig(t, Config{
+			Auth: &AuthConfig{Type: AuthTypeSimplePassword, KeyID: 1, Key: []byte("correct")},
+		})
+
+		// Wrong password: discarded.
+		r.script.writeAuth(StateDown, &AuthSection{
+			Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("wrong"),
+		}, true)
+
+		// No section on a session that requires one: discarded.
+		open := r.script.packet(StateDown)
+		open.YourDiscriminator = 0
+		r.script.write(open)
+
+		// Neither packet moved the machine off Down.
+		synctest.Wait()
+		select {
+		case sc := <-r.stateC:
+			t.Fatalf("unexpected transition on unauthenticated packets: %+v", sc)
+		default:
+		}
 	})
 }
 

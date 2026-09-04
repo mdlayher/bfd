@@ -27,7 +27,20 @@ const frrHostname = "frr-interop"
 
 // An frrConfig parameterizes testdata/frr/base.conf.tmpl.
 type frrConfig struct {
-	Peers []frrPeer
+	KeyChains []frrKeyChain
+	Peers     []frrPeer
+}
+
+// An frrKeyChain is a BFD authentication key chain. Only cleartext
+// (Simple Password) is modeled: the pinned FRR build has no other
+// algorithm compiled in.
+type frrKeyChain struct {
+	// Name is the key chain's name, referenced by a peer's AuthKeyChain.
+	Name string
+
+	// KeyID and Secret are the single key's identifier and password.
+	KeyID  int
+	Secret string
 }
 
 // An frrPeer is one single-hop BFD peer of an frrConfig. FRR's knobs
@@ -41,6 +54,10 @@ type frrPeer struct {
 	// receive-interval, and transmit-interval statements.
 	Multiplier int
 	RXMS, TXMS int
+
+	// AuthKeyChain, when set, names the key chain the peer authenticates
+	// with. It must match an frrKeyChain in the same config.
+	AuthKeyChain string
 }
 
 // An frr is a running FRR instance on the harness network.
@@ -126,6 +143,13 @@ type frrPeerJSON struct {
 	RemoteReceiveInterval  int `json:"remote-receive-interval"`
 	RemoteTransmitInterval int `json:"remote-transmit-interval"`
 	RemoteDetectMultiplier int `json:"remote-detect-multiplier"`
+
+	// Authentication is FRR's view of the session's authentication, present
+	// only when a key chain is configured on the peer.
+	Authentication struct {
+		Enabled    bool   `json:"enabled"`
+		CryptoName string `json:"cryptoName"`
+	} `json:"authentication"`
 }
 
 // peer fetches FRR's current view of the BFD peer at addr.

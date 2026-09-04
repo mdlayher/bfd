@@ -61,6 +61,9 @@ Exported doc comments:
 
 - Never sleep in tests. Every awaited condition must be signaled; poll
   loops with sleep intervals count as sleeping.
+- Independent scenarios are individual top-level Test functions. `t.Run`
+  is for a table's cases and for subtests sharing a fixture built by the
+  parent, such as one Test with per-case setup on a shared listener.
 - Test scenarios, not coverage. Cover paths a plausible real-world scenario
   hits, framed on behavior; 100% coverage is not a goal.
 - Test helpers, rig types, and shared fixtures go at the end of test files,

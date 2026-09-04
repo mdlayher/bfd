@@ -262,7 +262,7 @@ func TestParseControlPacketErrors(t *testing.T) {
 			},
 		},
 		{
-			name: "authentication present",
+			name: "authentication present without a section",
 			mod: func(b []byte) []byte {
 				b[1] |= flagAuthPresent
 				return b
@@ -311,6 +311,187 @@ func TestParseControlPacketErrors(t *testing.T) {
 
 			b := must(validPacket().AppendBinary(nil))
 			p, err := ParseControlPacket(tt.mod(b))
+			if p != nil {
+				t.Fatalf("expected nil packet, but got: %+v", p)
+			}
+
+			if err == nil {
+				t.Fatal("expected an error, but none occurred")
+			}
+		})
+	}
+}
+
+// TestControlPacketAuth covers the Simple Password Authentication Section:
+// its round trip, its exact wire encoding, and the marshal and parse checks
+// that guard it.
+func TestControlPacketAuthRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		auth *AuthSection
+	}{
+		{
+			name: "one byte password",
+			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("x")},
+		},
+		{
+			name: "typical password",
+			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 7, Data: []byte("hunter2")},
+		},
+		{
+			name: "sixteen byte password",
+			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 255, Data: []byte("0123456789abcdef")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := validPacket()
+			p.Auth = tt.auth
+
+			b, err := p.AppendBinary(nil)
+			if err != nil {
+				t.Fatalf("failed to marshal packet: %v", err)
+			}
+
+			got, err := ParseControlPacket(b)
+			if err != nil {
+				t.Fatalf("failed to parse packet: %v", err)
+			}
+
+			if d := diff(t, p, got); d != "" {
+				t.Fatalf("unexpected packet (-want +got):\n%s", d)
+			}
+		})
+	}
+}
+
+func TestControlPacketAuthWireFormat(t *testing.T) {
+	t.Parallel()
+
+	p := &ControlPacket{
+		State:             StateUp,
+		DetectMultiplier:  3,
+		MyDiscriminator:   0x01020304,
+		YourDiscriminator: 0x05060708,
+		DesiredMinTX:      300 * time.Millisecond,
+		RequiredMinRX:     300 * time.Millisecond,
+		Auth:              &AuthSection{Type: AuthTypeSimplePassword, KeyID: 7, Data: []byte("hunter2")},
+	}
+
+	b, err := p.AppendBinary(nil)
+	if err != nil {
+		t.Fatalf("failed to marshal packet: %v", err)
+	}
+
+	want := []byte{
+		// Version 1, diagnostic 0.
+		0x20,
+		// State Up and the Authentication Present bit.
+		0xc4,
+		// Detection multiplier and the length: 24 plus a 10 byte section.
+		0x03, 0x22,
+		// My and your discriminators.
+		0x01, 0x02, 0x03, 0x04,
+		0x05, 0x06, 0x07, 0x08,
+		// 300ms, 300ms, and a declined echo in whole microseconds.
+		0x00, 0x04, 0x93, 0xe0,
+		0x00, 0x04, 0x93, 0xe0,
+		0x00, 0x00, 0x00, 0x00,
+		// Auth Type 1, Auth Len 10, Key ID 7, then "hunter2".
+		0x01, 0x0a, 0x07,
+		0x68, 0x75, 0x6e, 0x74, 0x65, 0x72, 0x32,
+	}
+
+	if d := diff(t, want, b); d != "" {
+		t.Fatalf("unexpected wire encoding (-want +got):\n%s", d)
+	}
+}
+
+func TestControlPacketAuthAppendBinaryErrors(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		auth *AuthSection
+	}{
+		{
+			name: "empty password",
+			auth: &AuthSection{Type: AuthTypeSimplePassword},
+		},
+		{
+			name: "oversize password",
+			auth: &AuthSection{Type: AuthTypeSimplePassword, Data: bytes.Repeat([]byte{'a'}, 17)},
+		},
+		{
+			name: "unsupported type",
+			auth: &AuthSection{Type: AuthTypeKeyedSHA1, Data: bytes.Repeat([]byte{'a'}, 20)},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p := validPacket()
+			p.Auth = tt.auth
+
+			if b, err := p.AppendBinary(nil); err == nil {
+				t.Fatalf("expected an error, but marshaled: %x", b)
+			}
+		})
+	}
+}
+
+func TestParseControlPacketAuthErrors(t *testing.T) {
+	t.Parallel()
+
+	// A valid simple password packet as the base for corruption.
+	base := func() []byte {
+		p := validPacket()
+		p.Auth = &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("hunter2")}
+		return must(p.AppendBinary(nil))
+	}
+
+	tests := []struct {
+		name string
+		mod  func(b []byte) []byte
+	}{
+		{
+			name: "auth length field disagrees",
+			mod: func(b []byte) []byte {
+				b[25]++
+				return b
+			},
+		},
+		{
+			name: "unsupported auth type",
+			mod: func(b []byte) []byte {
+				b[24] = byte(AuthTypeKeyedSHA1)
+				return b
+			},
+		},
+		{
+			name: "section header truncated",
+			mod: func(b []byte) []byte {
+				// A bit set, length claims 25 bytes, only the type byte
+				// present: too short for the section's own header.
+				b = b[:packetLen+1]
+				b[3] = packetLen + 1
+				return b
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			p, err := ParseControlPacket(tt.mod(base()))
 			if p != nil {
 				t.Fatalf("expected nil packet, but got: %+v", p)
 			}
@@ -411,6 +592,13 @@ func FuzzParseControlPacket(f *testing.F) {
 			YourDiscriminator: math.MaxUint32,
 			DesiredMinTX:      math.MaxUint32 * time.Microsecond,
 			RequiredMinRX:     math.MaxUint32 * time.Microsecond,
+		},
+		{
+			State:             StateUp,
+			DetectMultiplier:  3,
+			MyDiscriminator:   5,
+			YourDiscriminator: 6,
+			Auth:              &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("hunter2")},
 		},
 	}
 

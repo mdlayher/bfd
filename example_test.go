@@ -68,6 +68,45 @@ func Example() {
 	}
 }
 
+// An authenticated session: both peers configure the same Simple Password
+// key, every packet carries it, and a packet that fails to authenticate
+// is discarded before it can touch the state machine. Simple Password
+// guards against misconfiguration, such as a link rewired to the wrong
+// neighbor, not against an attacker who can read the wire.
+func Example_authentication() {
+	local, peer := netip.MustParseAddr("192.0.2.1"), netip.MustParseAddr("192.0.2.2")
+
+	t, err := bfd.DialUDP(local, peer)
+	if err != nil {
+		log.Fatalf("failed to dial: %v", err)
+	}
+
+	s, err := bfd.NewSession(t, bfd.Config{
+		OnUp:   func(_ *bfd.Session) { log.Println("up") },
+		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { log.Printf("down: %v %v", d, err) },
+
+		// The peer must agree on the type, key ID, and key. Like the rest
+		// of Config, Auth is immutable: rotating the key is a cancel and a
+		// redial.
+		Auth: &bfd.AuthConfig{
+			Type:  bfd.AuthTypeSimplePassword,
+			KeyID: 1,
+			Key:   []byte("hunter2"),
+		},
+	})
+	if err != nil {
+		_ = t.Close()
+		log.Fatalf("failed to build session: %v", err)
+	}
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	if err := s.Run(ctx); ctx.Err() == nil {
+		log.Printf("session failed: %v", err)
+	}
+}
+
 // A session under a supervisor: a transport failure ends Run, since BFD
 // cannot run without its packets, so the caller redials with backoff to
 // bring the peering back. Run closes the transport before returning, so

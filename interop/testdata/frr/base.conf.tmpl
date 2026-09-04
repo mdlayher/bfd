@@ -10,12 +10,24 @@ frr defaults traditional
 hostname frr-interop
 log stdout
 !
+{{- range .KeyChains}}
+key chain {{.Name}}
+ key {{.KeyID}}
+  key-string {{.Secret}}
+  cryptographic-algorithm cleartext
+ exit
+exit
+!
+{{- end}}
 bfd
 {{- range .Peers}}
  peer {{.Addr}} local-address {{.Local}}
   detect-multiplier {{.Multiplier}}
   receive-interval {{.RXMS}}
   transmit-interval {{.TXMS}}
+  {{- if .AuthKeyChain}}
+  authentication key-chain {{.AuthKeyChain}}
+  {{- end}}
  exit
 {{- end}}
 exit

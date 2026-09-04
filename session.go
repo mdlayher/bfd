@@ -2,6 +2,7 @@ package bfd
 
 import (
 	"context"
+	"crypto/subtle"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -109,9 +110,32 @@ type Config struct {
 	// and must return promptly.
 	OnStateChange func(s *Session, from, to State)
 
+	// Auth, if set, enables authentication on the session: every packet
+	// is sent with an Authentication Section, and a received packet is
+	// accepted only if it authenticates. A nil Auth is an unauthenticated
+	// session, the default. Like the rest of Config it is immutable: an
+	// authentication change is a cancel and a redial.
+	Auth *AuthConfig
+
 	// Logger, if set, records state transitions at Info, and dropped
 	// packets and failed writes at Debug; nil discards everything.
 	Logger *slog.Logger
+}
+
+// An AuthConfig enables authentication on a Session. For Simple Password
+// (RFC 5880, section 6.7.2), Key is the password, 1 to 16 bytes, sent in
+// the clear and matched against the peer's. Simple Password is trivially
+// defeated by anyone who can read the wire; it guards against
+// misconfiguration, not attack.
+type AuthConfig struct {
+	// Type is the authentication type in use.
+	Type AuthType
+
+	// KeyID identifies the key to the peer, carried in every packet.
+	KeyID uint8
+
+	// Key is the password: the shared secret, 1 to 16 bytes.
+	Key []byte
 }
 
 // A Session runs the RFC 5880 state machine for one peer in asynchronous
@@ -170,6 +194,16 @@ func NewSession(t Transport, c Config) (*Session, error) {
 
 	c.DesiredMinTX = c.DesiredMinTX.Truncate(time.Microsecond)
 	c.RequiredMinRX = c.RequiredMinRX.Truncate(time.Microsecond)
+
+	if a := c.Auth; a != nil {
+		if a.Type != AuthTypeSimplePassword {
+			return nil, fmt.Errorf("bfd: only simple password authentication is supported: %s", a.Type)
+		}
+
+		if n := len(a.Key); n < 1 || n > 16 {
+			return nil, fmt.Errorf("bfd: simple password must be 1 to 16 bytes: %d", n)
+		}
+	}
 
 	log := c.Logger
 	if log == nil {
@@ -348,6 +382,14 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 		return
 	}
 
+	// The RFC 5880, section 6.8.6 authentication policy and, for a
+	// configured session, the section 6.7 verification: an unauthenticated
+	// packet is discarded whole, before it can touch the state machine.
+	if !s.authenticated(p) {
+		s.log.Debug("dropped packet: authentication failed")
+		return
+	}
+
 	s.remoteDiscr = p.MyDiscriminator
 	s.remoteMinRX = p.RequiredMinRX
 	s.remoteDesiredTX = p.DesiredMinTX
@@ -384,6 +426,31 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 	if p.Poll {
 		s.transmit(true)
 	}
+}
+
+// authenticated reports whether p may be applied to the state machine: the
+// RFC 5880, section 6.8.6 policy pairing the Authentication Present bit
+// with the session's configuration, and the section 6.7 verification of a
+// present section. An unconfigured session accepts only unauthenticated
+// packets, and a configured one only packets which authenticate.
+func (s *Session) authenticated(p *ControlPacket) bool {
+	a := s.cfg.Auth
+	if (a != nil) != (p.Auth != nil) {
+		// The A bit set without configured authentication, or clear with
+		// it: discarded either way (RFC 5880, section 6.8.6).
+		return false
+	}
+
+	if a == nil {
+		return true
+	}
+
+	// Simple Password (RFC 5880, section 6.7.2): the type and Key ID must
+	// match, and the password must be equal. The password is not a secret
+	// against a wire observer, but the compare is constant time anyway.
+	return p.Auth.Type == a.Type &&
+		p.Auth.KeyID == a.KeyID &&
+		subtle.ConstantTimeCompare(p.Auth.Data, a.Key) == 1
 }
 
 // transition moves the state machine to a new state, firing the caller's
@@ -428,6 +495,12 @@ func (s *Session) transmit(final bool) {
 		YourDiscriminator: s.remoteDiscr,
 		DesiredMinTX:      s.desiredMinTX(),
 		RequiredMinRX:     s.cfg.RequiredMinRX,
+	}
+
+	// Seal the packet: for Simple Password this is only attaching the
+	// password section (RFC 5880, section 6.7.2), which the codec emits.
+	if a := s.cfg.Auth; a != nil {
+		p.Auth = &AuthSection{Type: a.Type, KeyID: a.KeyID, Data: a.Key}
 	}
 
 	b, err := p.AppendBinary(s.wb[:0])

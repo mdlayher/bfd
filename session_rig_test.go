@@ -236,6 +236,21 @@ func (s *script) write(p *ControlPacket) {
 	}
 }
 
+// writeAuth sends a well-formed packet in the given state carrying auth. An
+// opening packet zeroes Your Discriminator, as a peer which has not yet
+// learned the session's discriminator does.
+func (s *script) writeAuth(state State, auth *AuthSection, open bool) {
+	s.tb.Helper()
+
+	p := s.packet(state)
+	if open {
+		p.YourDiscriminator = 0
+	}
+
+	p.Auth = auth
+	s.write(p)
+}
+
 // writeRaw sends hand-built wire bytes to the session.
 func (s *script) writeRaw(b []byte) {
 	s.tb.Helper()
