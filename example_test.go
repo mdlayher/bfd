@@ -7,6 +7,7 @@ import (
 	"net/netip"
 	"os"
 	"os/signal"
+	"sync"
 	"time"
 
 	"github.com/mdlayher/bfd"
@@ -105,6 +106,63 @@ func Example_authentication() {
 	if err := s.Run(ctx); ctx.Err() == nil {
 		log.Printf("session failed: %v", err)
 	}
+}
+
+// Many sessions on one local address: a shared listener owns the single
+// receiving socket and hands out one transport per neighbor, which is what
+// a link with two or more of them needs. DialUDP claims the local
+// address's port for one session and cannot.
+func Example_sharedListener() {
+	local := netip.MustParseAddr("192.0.2.1")
+	peers := []netip.Addr{
+		netip.MustParseAddr("192.0.2.2"),
+		netip.MustParseAddr("192.0.2.3"),
+	}
+
+	l, err := bfd.ListenUDP(local, bfd.ListenConfig{
+		// The listener's own logger: it records the datagrams which route
+		// to no session at all. A datagram which reaches a session is that
+		// session's logger's to report.
+		Logger: slog.With("local", local),
+	})
+	if err != nil {
+		log.Fatalf("failed to listen: %v", err)
+	}
+	defer func() { _ = l.Close() }()
+
+	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)
+	defer cancel()
+
+	var wg sync.WaitGroup
+	for _, peer := range peers {
+		// One transport per neighbor, routed by the listener below the
+		// Transport seam, so the sessions never learn of one another.
+		t, err := l.Dial(peer)
+		if err != nil {
+			log.Fatalf("failed to dial %s: %v", peer, err)
+		}
+
+		s, err := bfd.NewSession(t, bfd.Config{
+			OnUp:   func(_ *bfd.Session) { log.Printf("%s up", peer) },
+			OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { log.Printf("%s down: %v %v", peer, d, err) },
+			Logger: slog.With("peer", peer),
+		})
+		if err != nil {
+			_ = t.Close()
+			log.Fatalf("failed to build session for %s: %v", peer, err)
+		}
+
+		wg.Go(func() {
+			// Run closes its own transport as it returns, leaving the
+			// listener and its other sessions untouched. Closing the
+			// listener ends every session over it instead.
+			if err := s.Run(ctx); ctx.Err() == nil {
+				log.Printf("%s session failed: %v", peer, err)
+			}
+		})
+	}
+
+	wg.Wait()
 }
 
 // A session under a supervisor: a transport failure ends Run, since BFD

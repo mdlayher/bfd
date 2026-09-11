@@ -5,11 +5,12 @@ fast forwarding-path liveness between two systems, independent of the
 protocols routing over it: wire format, transport, and sessions.
 Single-hop asynchronous mode without authentication is the current
 scope: echo, demand mode, multihop (RFC 5883), and authentication may
-come later, and GTSM protects single-hop in the meantime. A shared
-listener demultiplexing many sessions on one local address is planned
-but unbuilt: DialUDP serves one session per local address today. No
-import edge with any routing protocol package in either direction: the
-caller wires a down signal into its own protocol.
+come later, and GTSM protects single-hop in the meantime. ListenUDP is
+the shared listener demultiplexing many sessions on one local address,
+one Transport per peer; DialUDP claims a local address's port outright
+and serves the one session on it. No import edge with any routing
+protocol package in either direction: the caller wires a down signal
+into its own protocol.
 
 ## Language
 

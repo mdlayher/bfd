@@ -5,8 +5,9 @@
 //
 // The package is built in layers, each usable without the ones above it:
 // ControlPacket and its binary encoding; Transport carrying packets between
-// two systems, with DialUDP the RFC 5881 single-hop implementation; and
-// Session running the RFC 5880 state machine in asynchronous mode,
+// two systems, with DialUDP the RFC 5881 single-hop implementation and
+// ListenUDP the shared listener serving many peers from one local address;
+// and Session running the RFC 5880 state machine in asynchronous mode,
 // reporting Up and Down to the caller's hooks.
 //
 // The current scope is single-hop, asynchronous BFD: the echo function is

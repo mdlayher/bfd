@@ -21,8 +21,9 @@ const (
 )
 
 var (
-	hostAddr4 = netip.MustParseAddr(hostV4)
-	hostAddr6 = netip.MustParseAddr(hostV6)
+	hostAddr4    = netip.MustParseAddr(hostV4)
+	hostAddr4Alt = netip.MustParseAddr(hostV4Alt)
+	hostAddr6    = netip.MustParseAddr(hostV6)
 )
 
 // Scenario 1: session establishment, per address family. Both sides
@@ -173,6 +174,38 @@ func TestFRRHoldAfterUp(t *testing.T) {
 	f.awaitStatus(t, host, "up")
 }
 
+// Scenario 6: the shared listener. One local address carries two
+// sessions at once, the oracle's and a second one to another host
+// address, so FRR's datagrams must be demultiplexed to their own
+// session against live traffic on the same socket. FRR is only ever
+// one of the two peers: see hostV4Alt for why a second FRR-side peer
+// would take a second instance.
+func TestFRRSharedListener(t *testing.T) {
+	f, host := startFRRPeer(t, false)
+
+	l, err := bfd.ListenUDP(host, bfd.ListenConfig{})
+	if err != nil {
+		t.Fatalf("failed to listen on %s: %v", host, err)
+	}
+	t.Cleanup(func() { _ = l.Close() })
+
+	oracle, oracleUp, _, _ := runTransport(t, dialListener(t, l, f.Addr))
+	_, siblingUp, _, _ := runTransport(t, dialListener(t, l, hostAddr4Alt))
+	_, farUp, _ := runSession(t, hostAddr4Alt, host)
+
+	await(t, oracleUp, "OnUp against the oracle")
+	await(t, siblingUp, "OnUp on the sibling session")
+	await(t, farUp, "OnUp on the sibling's far end")
+
+	// The oracle's own view is the proof its packets landed on its own
+	// session: the discriminator FRR learned is that session's, not the
+	// sibling's, and FRR would never have reached up without them.
+	p := f.awaitStatus(t, host, "up")
+	if got, want := p.RemoteID, oracle.LocalDiscriminator(); got != want {
+		t.Errorf("FRR reports unexpected remote discriminator: got %d, want %d", got, want)
+	}
+}
+
 // startFRRPeer starts an FRR instance configured with the harness
 // timing fixture for one single-hop peer, returning it and the host
 // address the library session uses for the chosen family.
@@ -225,6 +258,27 @@ func runSessionCancel(t *testing.T, local, peer netip.Addr) (*bfd.Session, <-cha
 	if err != nil {
 		t.Fatalf("failed to dial transport: %v", err)
 	}
+
+	return runTransport(t, tr)
+}
+
+// dialListener builds one peer's Transport on a shared listener.
+func dialListener(t *testing.T, l *bfd.Listener, peer netip.Addr) bfd.Transport {
+	t.Helper()
+
+	tr, err := l.Dial(peer)
+	if err != nil {
+		t.Fatalf("failed to dial peer %s: %v", peer, err)
+	}
+
+	return tr
+}
+
+// runTransport runs a Session over tr on a test-scoped goroutine,
+// returning the Session, channels delivering each OnUp and OnDown, and
+// Run's cancel function. Teardown cancels Run and joins it when t ends.
+func runTransport(t *testing.T, tr bfd.Transport) (*bfd.Session, <-chan struct{}, <-chan sessionDown, context.CancelFunc) {
+	t.Helper()
 
 	upC := make(chan struct{}, 4)
 	downC := make(chan sessionDown, 4)

@@ -50,6 +50,14 @@ const (
 	hostV4 = "192.168.240.1"
 	hostV6 = "fd00:2026:8::1"
 
+	// hostV4Alt is a second host address, the far end of the second
+	// session a shared listener scenario needs. FRR itself cannot be that
+	// second peer: its single-hop sessions are keyed by peer address, so
+	// two `peer <host> local-address <addr>` statements collapse into one
+	// session, and a second FRR-side peer would take a second instance
+	// with a veth pair of its own.
+	hostV4Alt = "192.168.240.2"
+
 	// The FRR instance's static addresses. Tests run serially, so a
 	// single pair serves every scenario.
 	frrV4 = "192.168.240.10"

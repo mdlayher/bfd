@@ -290,6 +290,7 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 	plen6 := strconv.Itoa(netip.MustParsePrefix(netV6).Bits())
 	ipCmd("link", "add", vethHost, "type", "veth", "peer", "name", vethFRR)
 	ipCmd("addr", "add", hostV4+"/"+plen4, "dev", vethHost)
+	ipCmd("addr", "add", hostV4Alt+"/"+plen4, "dev", vethHost)
 	ipCmd("-6", "addr", "add", hostV6+"/"+plen6, "dev", vethHost, "nodad")
 	ipCmd("link", "set", vethHost, "up")
 	ipCmd("link", "set", vethFRR, "netns", strconv.Itoa(init.Process.Pid))
