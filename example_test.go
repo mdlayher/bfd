@@ -42,10 +42,10 @@ func Example() {
 				// routes and reset the protected protocol's session.
 				log.Printf("down, transport failed: %v", err)
 			case remote == bfd.StateAdminDown:
-				// The peer administratively shut BFD down, such as by
-				// removing it from its configuration. RFC 5882, section
-				// 3.2: this is not a forwarding failure, so keep the
-				// protected protocol's session and its routes.
+				// The peer administratively shut BFD down, such as an
+				// operator shutting the peer down on its router. RFC 5882,
+				// section 3.2: this is not a forwarding failure, so keep
+				// the protected protocol's session and its routes.
 				log.Printf("down, peer is administratively down: %v", d)
 			default:
 				// Any other fall is the down signal: withdraw routes and
