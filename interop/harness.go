@@ -2,18 +2,18 @@
 
 // Package interop tests github.com/mdlayher/bfd against a real BFD
 // implementation: FRRouting's bfdd, the suite's oracle, hosted as
-// native daemons inside nested network namespaces (Linux only; see
-// netns.go). Nothing beyond unprivileged user namespaces is required,
-// but iproute2 must be on $PATH and the daemons — zebra and bfdd,
-// since bfdd learns its interfaces through zebra — must be exactly FRR
-// frrVersion: see the constant. The repository's nix dev shell
-// provides all of it:
+// native daemons inside nested network namespaces. It runs only on
+// Linux: see netns.go. Nothing beyond unprivileged user namespaces is
+// required, but iproute2 must be on $PATH, and the daemons must be
+// exactly FRR frrVersion: see the constant. Both zebra and bfdd are
+// required, since bfdd learns its interfaces through zebra. The
+// repository's nix dev shell provides all of it:
 //
 //	nix develop -c go test -tags interop -race ./interop
 //
-// $BFD_INTEROP_FRR names the daemon directory explicitly (e.g.
-// /usr/lib/frr, or a Nix store path's libexec/frr); without it, the
-// suite discovers the daemons in the usual install locations — see
+// $BFD_INTEROP_FRR names the daemon directory explicitly, such as
+// /usr/lib/frr or a Nix store path's libexec/frr. Without it, the
+// suite discovers the daemons in the usual install locations: see
 // detectFRR.
 //
 // The suite is compiled only with the interop build tag:
@@ -47,8 +47,7 @@ const (
 
 	// The host's own addresses on the network: the local addresses a
 	// library session dials from inside the test binary.
-	hostV4 = "192.168.240.1"
-	hostV6 = "fd00:2026:8::1"
+	hostV4, hostV6 = "192.168.240.1", "fd00:2026:8::1"
 
 	// hostV4Alt is a second host address, the far end of the second
 	// session a shared listener scenario needs. FRR itself cannot be that
@@ -60,8 +59,7 @@ const (
 
 	// The FRR instance's static addresses. Tests run serially, so a
 	// single pair serves every scenario.
-	frrV4 = "192.168.240.10"
-	frrV6 = "fd00:2026:8::10"
+	frrV4, frrV6 = "192.168.240.10", "fd00:2026:8::10"
 )
 
 // instanceName derives a unique, filesystem-legal instance name from t.

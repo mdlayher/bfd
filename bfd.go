@@ -347,11 +347,26 @@ func (p *ControlPacket) AppendBinary(b []byte) ([]byte, error) {
 		set  bool
 		mask uint8
 	}{
-		{p.Poll, flagPoll},
-		{p.Final, flagFinal},
-		{p.ControlPlaneIndependent, flagControlPlane},
-		{p.Demand, flagDemand},
-		{p.Auth != nil, flagAuthPresent},
+		{
+			set:  p.Poll,
+			mask: flagPoll,
+		},
+		{
+			set:  p.Final,
+			mask: flagFinal,
+		},
+		{
+			set:  p.ControlPlaneIndependent,
+			mask: flagControlPlane,
+		},
+		{
+			set:  p.Demand,
+			mask: flagDemand,
+		},
+		{
+			set:  p.Auth != nil,
+			mask: flagAuthPresent,
+		},
 	} {
 		if f.set {
 			flags |= f.mask

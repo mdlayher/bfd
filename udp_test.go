@@ -1,7 +1,6 @@
 package bfd
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"net"
@@ -112,6 +111,7 @@ func TestUDPTransportIPv4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial transport A: %v", err)
 	}
+
 	t.Cleanup(func() { _ = a.Close() })
 
 	// The reverse direction names its peer 4-in-6 mapped, which DialUDP
@@ -120,6 +120,7 @@ func TestUDPTransportIPv4(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial transport B: %v", err)
 	}
+
 	t.Cleanup(func() { _ = b.Close() })
 
 	// One transport exists per local address: A already owns 127.0.0.1's
@@ -135,11 +136,15 @@ func TestUDPTransportIPv4(t *testing.T) {
 	spoofed, err := net.DialUDP(
 		"udp",
 		&net.UDPAddr{IP: net.ParseIP("127.0.0.9")},
-		&net.UDPAddr{IP: net.ParseIP("127.0.0.2"), Port: Port},
+		&net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.2"),
+			Port: Port,
+		},
 	)
 	if err != nil {
 		t.Fatalf("failed to dial spoofed source: %v", err)
 	}
+
 	t.Cleanup(func() { _ = spoofed.Close() })
 
 	if _, err := spoofed.Write([]byte("wrong source address")); err != nil {
@@ -150,11 +155,15 @@ func TestUDPTransportIPv4(t *testing.T) {
 	lowTTL, err := net.DialUDP(
 		"udp",
 		&net.UDPAddr{IP: net.ParseIP("127.0.0.1")},
-		&net.UDPAddr{IP: net.ParseIP("127.0.0.2"), Port: Port},
+		&net.UDPAddr{
+			IP:   net.ParseIP("127.0.0.2"),
+			Port: Port,
+		},
 	)
 	if err != nil {
 		t.Fatalf("failed to dial low TTL source: %v", err)
 	}
+
 	t.Cleanup(func() { _ = lowTTL.Close() })
 
 	if _, err := lowTTL.Write([]byte("low TTL")); err != nil {
@@ -169,8 +178,8 @@ func TestUDPTransportIPv4(t *testing.T) {
 	}
 
 	got, drops := readDatagram(t, b)
-	if !bytes.Equal(payload, got) {
-		t.Fatalf("unexpected B payload: got %q, want %q", got, payload)
+	if d := diff(t, payload, got); d != "" {
+		t.Fatalf("unexpected B payload (-want +got):\n%s", d)
 	}
 
 	if drops != 2 {
@@ -182,18 +191,17 @@ func TestUDPTransportIPv4(t *testing.T) {
 		t.Fatalf("failed to write B to A: %v", err)
 	}
 
-	if got, drops := readDatagram(t, a); !bytes.Equal(payload, got) || drops != 0 {
-		t.Fatalf("unexpected A payload: got %q (%d drops), want %q", got, drops, payload)
+	got, drops = readDatagram(t, a)
+	if d := diff(t, payload, got); d != "" {
+		t.Fatalf("unexpected A payload (-want +got):\n%s", d)
+	}
+
+	if drops != 0 {
+		t.Fatalf("unexpected A drop count: got %d, want 0", drops)
 	}
 
 	// Close must unblock a pending read, so a session can always tear down.
-	errC := make(chan error, 1)
-	go func() {
-		buf := make([]byte, 64)
-		_, err := a.ReadPacket(buf)
-		errC <- err
-	}()
-
+	errC := readAsync(a)
 	_ = a.Close()
 	if err := recv(t, errC, "the read to unblock"); err == nil {
 		t.Fatal("expected an error from the unblocked read, but none occurred")
@@ -212,6 +220,7 @@ func TestUDPTransportIPv6(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to dial transport: %v", err)
 	}
+
 	t.Cleanup(func() { _ = tr.Close() })
 
 	payload := []byte("hello, self")
@@ -219,8 +228,13 @@ func TestUDPTransportIPv6(t *testing.T) {
 		t.Fatalf("failed to write: %v", err)
 	}
 
-	if got, drops := readDatagram(t, tr); !bytes.Equal(payload, got) || drops != 0 {
-		t.Fatalf("unexpected payload: got %q (%d drops), want %q", got, drops, payload)
+	got, drops := readDatagram(t, tr)
+	if d := diff(t, payload, got); d != "" {
+		t.Fatalf("unexpected payload (-want +got):\n%s", d)
+	}
+
+	if drops != 0 {
+		t.Fatalf("unexpected drop count: got %d, want 0", drops)
 	}
 }
 
@@ -234,6 +248,7 @@ func TestUDPTransportIPv6(t *testing.T) {
 // blame, so it drops instead, which TestListenerRouting covers.
 func TestDialUDPUnroutableDatagram(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local, peer := netip.MustParseAddr("127.0.7.1"), netip.MustParseAddr("127.0.7.2")
@@ -241,18 +256,18 @@ func TestDialUDPUnroutableDatagram(t *testing.T) {
 
 	// Neither a first contact nor a steady-state packet from a source
 	// which is not the peer can be routed, and both must be reported.
-	spoofed := newRawPeer(t, netip.MustParseAddr("127.0.7.9"), local, 255)
+	spoofed := newRawPeer(t, netip.MustParseAddr("127.0.7.9"), local)
 	spoofed.write(peerPacket(scriptDiscr, 0))
 	spoofed.write(peerPacket(scriptDiscr, 0xdeadbeef))
 
 	// A discriminator naming no session, but from the peer itself, passes
 	// the section 5 checks and is the Session's to discard, exactly as it
 	// was before a listener sat underneath.
-	newRawPeer(t, peer, local, 255).write(peerPacket(scriptDiscr, 0xdeadbeef))
+	newRawPeer(t, peer, local).write(peerPacket(scriptDiscr, 0xdeadbeef))
 
 	got, drops := readDatagram(t, tr)
-	if want := must(peerPacket(scriptDiscr, 0xdeadbeef).AppendBinary(nil)); !bytes.Equal(got, want) {
-		t.Fatalf("unexpected payload: got %x, want %x", got, want)
+	if d := diff(t, must(peerPacket(scriptDiscr, 0xdeadbeef).AppendBinary(nil)), got); d != "" {
+		t.Fatalf("unexpected payload (-want +got):\n%s", d)
 	}
 
 	if drops != 2 {
@@ -298,6 +313,7 @@ func TestListenUDPErrors(t *testing.T) {
 // peer it already has a session with.
 func TestListenerDialErrors(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.1.1")
@@ -333,6 +349,8 @@ func TestListenerDialErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
 			tr, err := l.Dial(tt.peer)
 			if err == nil {
 				_ = tr.Close()
@@ -383,6 +401,7 @@ func TestListenerDialZoneMismatch(t *testing.T) {
 // address each, which is all DialUDP can do.
 func TestListenerTwoSessionsOneLocalAddress(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.2.1")
@@ -394,10 +413,22 @@ func TestListenerTwoSessionsOneLocalAddress(t *testing.T) {
 		name string
 		upC  <-chan struct{}
 	}{
-		{name: "near A", upC: runUDPSession(t, dial(t, l, peerA))},
-		{name: "near B", upC: runUDPSession(t, dial(t, l, peerB))},
-		{name: "far A", upC: runUDPSession(t, dialUDP(t, peerA, local))},
-		{name: "far B", upC: runUDPSession(t, dialUDP(t, peerB, local))},
+		{
+			name: "near A",
+			upC:  runUDPSession(t, dial(t, l, peerA)),
+		},
+		{
+			name: "near B",
+			upC:  runUDPSession(t, dial(t, l, peerB)),
+		},
+		{
+			name: "far A",
+			upC:  runUDPSession(t, dialUDP(t, peerA, local)),
+		},
+		{
+			name: "far B",
+			upC:  runUDPSession(t, dialUDP(t, peerB, local)),
+		},
 	}
 
 	for _, up := range ups {
@@ -411,17 +442,20 @@ func TestListenerTwoSessionsOneLocalAddress(t *testing.T) {
 // session.
 func TestListenerRouting(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.3.1")
 	l := listen(t, local)
 
 	t.Run("a nonzero your discriminator selects its session", func(t *testing.T) {
+		t.Parallel()
+
 		peerA, peerB := netip.MustParseAddr("127.0.3.2"), netip.MustParseAddr("127.0.3.3")
 		ta, tb := dial(t, l, peerA), dial(t, l, peerB)
 
-		rawA := newRawPeer(t, peerA, local, 255)
-		newRawPeer(t, peerB, local, 255)
+		rawA := newRawPeer(t, peerA, local)
+		newRawPeer(t, peerB, local)
 
 		// Each session's first transmission is what teaches the listener
 		// its discriminator; no caller registers anything.
@@ -440,8 +474,8 @@ func TestListenerRouting(t *testing.T) {
 		}
 
 		got, drops := readDatagram(t, ta)
-		if want := must(peerPacket(scriptDiscr, discrA).AppendBinary(nil)); !bytes.Equal(got, want) {
-			t.Fatalf("unexpected A payload: got %x, want %x", got, want)
+		if d := diff(t, must(peerPacket(scriptDiscr, discrA).AppendBinary(nil)), got); d != "" {
+			t.Fatalf("unexpected A payload (-want +got):\n%s", d)
 		}
 
 		if drops != 0 {
@@ -450,11 +484,13 @@ func TestListenerRouting(t *testing.T) {
 	})
 
 	t.Run("a zero your discriminator selects by source address", func(t *testing.T) {
+		t.Parallel()
+
 		peerC, peerD := netip.MustParseAddr("127.0.3.4"), netip.MustParseAddr("127.0.3.5")
 		tc, td := dial(t, l, peerC), dial(t, l, peerD)
 
-		rawC := newRawPeer(t, peerC, local, 255)
-		rawD := newRawPeer(t, peerD, local, 255)
+		rawC := newRawPeer(t, peerC, local)
+		rawD := newRawPeer(t, peerD, local)
 
 		// Neither session has transmitted, so neither discriminator is
 		// known: first contact is the address pair's to route, and each
@@ -468,12 +504,20 @@ func TestListenerRouting(t *testing.T) {
 			tr    Transport
 			discr uint32
 		}{
-			{name: "C", tr: tc, discr: discrC},
-			{name: "D", tr: td, discr: discrD},
+			{
+				name:  "C",
+				tr:    tc,
+				discr: discrC,
+			},
+			{
+				name:  "D",
+				tr:    td,
+				discr: discrD,
+			},
 		} {
 			got, drops := readDatagram(t, tt.tr)
-			if want := must(peerPacket(tt.discr, 0).AppendBinary(nil)); !bytes.Equal(got, want) {
-				t.Fatalf("unexpected %s payload: got %x, want %x", tt.name, got, want)
+			if d := diff(t, must(peerPacket(tt.discr, 0).AppendBinary(nil)), got); d != "" {
+				t.Fatalf("unexpected %s payload (-want +got):\n%s", tt.name, d)
 			}
 
 			if drops != 0 {
@@ -483,9 +527,11 @@ func TestListenerRouting(t *testing.T) {
 	})
 
 	t.Run("an unknown discriminator never reaches a session", func(t *testing.T) {
+		t.Parallel()
+
 		peerE := netip.MustParseAddr("127.0.3.6")
 		te := dial(t, l, peerE)
-		rawE := newRawPeer(t, peerE, local, 255)
+		rawE := newRawPeer(t, peerE, local)
 
 		// No session owns this discriminator, so the listener drops the
 		// datagram itself. The first contact behind it arrives with no
@@ -494,8 +540,8 @@ func TestListenerRouting(t *testing.T) {
 		rawE.write(peerPacket(scriptDiscr, 0))
 
 		got, drops := readDatagram(t, te)
-		if want := must(peerPacket(scriptDiscr, 0).AppendBinary(nil)); !bytes.Equal(got, want) {
-			t.Fatalf("unexpected E payload: got %x, want %x", got, want)
+		if d := diff(t, must(peerPacket(scriptDiscr, 0).AppendBinary(nil)), got); d != "" {
+			t.Fatalf("unexpected E payload (-want +got):\n%s", d)
 		}
 
 		if drops != 0 {
@@ -504,12 +550,16 @@ func TestListenerRouting(t *testing.T) {
 	})
 
 	t.Run("a TTL below 255 is dropped by the routed session", func(t *testing.T) {
+		t.Parallel()
+
 		peerF := netip.MustParseAddr("127.0.3.7")
 		tf := dial(t, l, peerF)
 
 		// The RFC 5881, section 5 checks stay below the Transport seam and
 		// surface on the session the datagram routed to.
-		newRawPeer(t, peerF, local, 1).write(peerPacket(scriptDiscr, 0))
+		raw := newRawPeer(t, peerF, local)
+		raw.setTTL(1)
+		raw.write(peerPacket(scriptDiscr, 0))
 
 		if _, err := readOnce(t, tf); !errors.Is(err, ErrDropped) {
 			t.Fatalf("expected a drop report on F, but got: %v", err)
@@ -522,6 +572,7 @@ func TestListenerRouting(t *testing.T) {
 // sibling on the same listener carries on.
 func TestListenerTransportClose(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.4.1")
@@ -529,7 +580,7 @@ func TestListenerTransportClose(t *testing.T) {
 
 	l := listen(t, local)
 	ta, tb := dial(t, l, peerA), dial(t, l, peerB)
-	rawB := newRawPeer(t, peerB, local, 255)
+	rawB := newRawPeer(t, peerB, local)
 
 	// Close is called concurrently with a pending read and must unblock it
 	// terminally, so Session.Run returns instead of reading again.
@@ -558,6 +609,7 @@ func TestListenerTransportClose(t *testing.T) {
 	if err != nil {
 		t.Fatalf("failed to redial peer A: %v", err)
 	}
+
 	_ = tr.Close()
 }
 
@@ -565,6 +617,7 @@ func TestListenerTransportClose(t *testing.T) {
 // it ends terminally, no new one may start, and closing twice is harmless.
 func TestListenerClose(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.5.1")
@@ -585,8 +638,14 @@ func TestListenerClose(t *testing.T) {
 		name string
 		errC <-chan error
 	}{
-		{name: "A", errC: errA},
-		{name: "B", errC: errB},
+		{
+			name: "A",
+			errC: errA,
+		},
+		{
+			name: "B",
+			errC: errB,
+		},
 	} {
 		err := recv(t, tt.errC, tt.name+"'s read to unblock")
 		if err == nil || errors.Is(err, ErrDropped) {
@@ -627,6 +686,7 @@ func TestListenerClose(t *testing.T) {
 // the listener would read forever against a socket which is gone.
 func TestListenerReadFailure(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.6.1")
@@ -655,6 +715,7 @@ func TestListenerReadFailure(t *testing.T) {
 // the exchange at the end proves the listener still routes afterwards.
 func TestListenerCloseWhileRouting(t *testing.T) {
 	t.Parallel()
+
 	requireLoopbackAddrs(t)
 
 	local := netip.MustParseAddr("127.0.8.1")
@@ -673,7 +734,7 @@ func TestListenerCloseWhileRouting(t *testing.T) {
 
 	var wg sync.WaitGroup
 	for _, peer := range peers {
-		raw := newRawPeer(t, peer, local, 255)
+		raw := newRawPeer(t, peer, local)
 		wg.Go(func() {
 			for range rounds {
 				_ = raw.send(peerPacket(scriptDiscr, 0))
@@ -705,7 +766,7 @@ func TestListenerCloseWhileRouting(t *testing.T) {
 	// its read goroutine came through intact.
 	peer := netip.MustParseAddr("127.0.8.5")
 	tr := dial(t, l, peer)
-	newRawPeer(t, peer, local, 255).write(peerPacket(scriptDiscr, 0))
+	newRawPeer(t, peer, local).write(peerPacket(scriptDiscr, 0))
 
 	if _, drops := readDatagram(t, tr); drops != 0 {
 		t.Fatalf("unexpected drop count: got %d, want 0", drops)
@@ -727,29 +788,45 @@ func TestSourceKey(t *testing.T) {
 	}{
 		{
 			name: "not a UDP address",
-			src:  &net.TCPAddr{IP: net.ParseIP("127.0.0.1"), Port: Port},
+			src: &net.TCPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: Port,
+			},
 		},
 		{
 			name: "IPv4",
-			src:  &net.UDPAddr{IP: net.ParseIP("127.0.0.1"), Port: Port},
+			src: &net.UDPAddr{
+				IP:   net.ParseIP("127.0.0.1"),
+				Port: Port,
+			},
 			want: netip.MustParseAddr("127.0.0.1"),
 			ok:   true,
 		},
 		{
 			name: "4-in-6 mapped",
-			src:  &net.UDPAddr{IP: net.ParseIP("::ffff:127.0.0.1"), Port: Port},
+			src: &net.UDPAddr{
+				IP:   net.ParseIP("::ffff:127.0.0.1"),
+				Port: Port,
+			},
 			want: netip.MustParseAddr("127.0.0.1"),
 			ok:   true,
 		},
 		{
 			name: "IPv6",
-			src:  &net.UDPAddr{IP: net.ParseIP("fd00::1"), Port: Port},
+			src: &net.UDPAddr{
+				IP:   net.ParseIP("fd00::1"),
+				Port: Port,
+			},
 			want: netip.MustParseAddr("fd00::1"),
 			ok:   true,
 		},
 		{
 			name: "link-local IPv6 with a zone",
-			src:  &net.UDPAddr{IP: net.ParseIP("fe80::1"), Port: Port, Zone: "eth0"},
+			src: &net.UDPAddr{
+				IP:   net.ParseIP("fe80::1"),
+				Port: Port,
+				Zone: "eth0",
+			},
 			want: netip.MustParseAddr("fe80::1%eth0"),
 			ok:   true,
 		},
@@ -764,8 +841,8 @@ func TestSourceKey(t *testing.T) {
 				t.Fatalf("unexpected ok: got %v, want %v", ok, tt.ok)
 			}
 
-			if got != tt.want {
-				t.Fatalf("unexpected key: got %s, want %s", got, tt.want)
+			if d := diff(t, tt.want, got); d != "" {
+				t.Fatalf("unexpected key (-want +got):\n%s", d)
 			}
 		})
 	}
@@ -801,7 +878,12 @@ func readDatagram(tb testing.TB, tr Transport) ([]byte, int) {
 				continue
 			}
 
-			resC <- result{b: b[:n], drops: drops, err: err}
+			resC <- result{
+				b:     b[:n],
+				drops: drops,
+				err:   err,
+			}
+
 			return
 		}
 	}()
@@ -832,6 +914,7 @@ func listen(tb testing.TB, local netip.Addr) *Listener {
 	if err != nil {
 		tb.Fatalf("failed to listen on %s: %v", local, err)
 	}
+
 	tb.Cleanup(func() { _ = l.Close() })
 
 	return l
@@ -845,6 +928,7 @@ func dial(tb testing.TB, l *Listener, peer netip.Addr) Transport {
 	if err != nil {
 		tb.Fatalf("failed to dial peer %s: %v", peer, err)
 	}
+
 	tb.Cleanup(func() { _ = tr.Close() })
 
 	return tr
@@ -859,6 +943,7 @@ func dialUDP(tb testing.TB, local, peer netip.Addr) Transport {
 	if err != nil {
 		tb.Fatalf("failed to dial %s to %s: %v", local, peer, err)
 	}
+
 	tb.Cleanup(func() { _ = tr.Close() })
 
 	return tr
@@ -927,25 +1012,35 @@ type rawPeer struct {
 	to *net.UDPAddr
 }
 
-// newRawPeer binds addr's Port and aims at local's, torn down when the
-// test ends.
-func newRawPeer(tb testing.TB, addr, local netip.Addr, ttl int) *rawPeer {
+// newRawPeer binds addr's Port and aims at local's with the TTL of 255
+// RFC 5881, section 5 demands, torn down when the test ends.
+func newRawPeer(tb testing.TB, addr, local netip.Addr) *rawPeer {
 	tb.Helper()
 
 	c, err := net.ListenUDP("udp", net.UDPAddrFromAddrPort(netip.AddrPortFrom(addr, Port)))
 	if err != nil {
 		tb.Fatalf("failed to bind raw peer %s: %v", addr, err)
 	}
+
 	tb.Cleanup(func() { _ = c.Close() })
 
-	if err := ipv4.NewConn(c).SetTTL(ttl); err != nil {
-		tb.Fatalf("failed to set raw peer TTL: %v", err)
-	}
-
-	return &rawPeer{
+	p := &rawPeer{
 		tb: tb,
 		c:  c,
 		to: net.UDPAddrFromAddrPort(netip.AddrPortFrom(local, Port)),
+	}
+
+	p.setTTL(255)
+	return p
+}
+
+// setTTL sets the TTL of every later write, such as one below 255 for a
+// scenario the RFC 5881, section 5 check must drop.
+func (p *rawPeer) setTTL(ttl int) {
+	p.tb.Helper()
+
+	if err := ipv4.NewConn(p.c).SetTTL(ttl); err != nil {
+		p.tb.Fatalf("failed to set raw peer TTL: %v", err)
 	}
 }
 
@@ -973,8 +1068,7 @@ func (p *rawPeer) send(cp *ControlPacket) error {
 func readAsync(tr Transport) <-chan error {
 	errC := make(chan error, 1)
 	go func() {
-		b := make([]byte, 64)
-		_, err := tr.ReadPacket(b)
+		_, err := tr.ReadPacket(make([]byte, 64))
 		errC <- err
 	}()
 
@@ -995,7 +1089,10 @@ func readOnce(tb testing.TB, tr Transport) ([]byte, error) {
 	go func() {
 		b := make([]byte, 64)
 		n, err := tr.ReadPacket(b)
-		resC <- result{b: b[:n], err: err}
+		resC <- result{
+			b:   b[:n],
+			err: err,
+		}
 	}()
 
 	res := recv(tb, resC, "a read to return")

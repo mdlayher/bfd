@@ -211,12 +211,12 @@ func NewSession(t Transport, c Config) (*Session, error) {
 	c.DesiredMinTX = c.DesiredMinTX.Truncate(time.Microsecond)
 	c.RequiredMinRX = c.RequiredMinRX.Truncate(time.Microsecond)
 
-	if a := c.Auth; a != nil {
-		if a.Type != AuthTypeSimplePassword {
-			return nil, fmt.Errorf("bfd: only simple password authentication is supported: %s", a.Type)
+	if c.Auth != nil {
+		if c.Auth.Type != AuthTypeSimplePassword {
+			return nil, fmt.Errorf("bfd: only simple password authentication is supported: %s", c.Auth.Type)
 		}
 
-		if n := len(a.Key); n < 1 || n > 16 {
+		if n := len(c.Auth.Key); n < 1 || n > 16 {
 			return nil, fmt.Errorf("bfd: simple password must be 1 to 16 bytes: %d", n)
 		}
 	}
@@ -363,7 +363,10 @@ func (s *Session) read(ctx context.Context, packetC chan<- *ControlPacket, errC 
 		n, err := s.t.ReadPacket(buf)
 		if err != nil {
 			if errors.Is(err, ErrDropped) {
-				s.log.Debug("dropped datagram", "err", err)
+				if s.log.Enabled(ctx, slog.LevelDebug) {
+					s.log.Debug("dropped datagram", "err", err)
+				}
+
 				continue
 			}
 
@@ -377,7 +380,10 @@ func (s *Session) read(ctx context.Context, packetC chan<- *ControlPacket, errC 
 
 		p, err := ParseControlPacket(buf[:n])
 		if err != nil {
-			s.log.Debug("dropped packet", "err", err)
+			if s.log.Enabled(ctx, slog.LevelDebug) {
+				s.log.Debug("dropped packet", "err", err)
+			}
+
 			continue
 		}
 
@@ -396,7 +402,10 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 	// which has not learned it yet, which parse permits only in its Down
 	// states.
 	if p.YourDiscriminator != 0 && p.YourDiscriminator != s.localDiscr {
-		s.log.Debug("dropped packet: unknown discriminator", "your_discr", p.YourDiscriminator)
+		if s.log.Enabled(context.Background(), slog.LevelDebug) {
+			s.log.Debug("dropped packet: unknown discriminator", "your_discr", p.YourDiscriminator)
+		}
+
 		return
 	}
 
@@ -404,7 +413,10 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 	// configured session, the section 6.7 verification: an unauthenticated
 	// packet is discarded whole, before it can touch the state machine.
 	if !s.authenticated(p) {
-		s.log.Debug("dropped packet: authentication failed")
+		if s.log.Enabled(context.Background(), slog.LevelDebug) {
+			s.log.Debug("dropped packet: authentication failed")
+		}
+
 		return
 	}
 
@@ -457,23 +469,22 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 // present section. An unconfigured session accepts only unauthenticated
 // packets, and a configured one only packets which authenticate.
 func (s *Session) authenticated(p *ControlPacket) bool {
-	a := s.cfg.Auth
-	if (a != nil) != (p.Auth != nil) {
+	if (s.cfg.Auth != nil) != (p.Auth != nil) {
 		// The A bit set without configured authentication, or clear with
 		// it: discarded either way (RFC 5880, section 6.8.6).
 		return false
 	}
 
-	if a == nil {
+	if s.cfg.Auth == nil {
 		return true
 	}
 
 	// Simple Password (RFC 5880, section 6.7.2): the type and Key ID must
 	// match, and the password must be equal. The password is not a secret
 	// against a wire observer, but the compare is constant time anyway.
-	return p.Auth.Type == a.Type &&
-		p.Auth.KeyID == a.KeyID &&
-		subtle.ConstantTimeCompare(p.Auth.Data, a.Key) == 1
+	return p.Auth.Type == s.cfg.Auth.Type &&
+		p.Auth.KeyID == s.cfg.Auth.KeyID &&
+		subtle.ConstantTimeCompare(p.Auth.Data, s.cfg.Auth.Key) == 1
 }
 
 // transition moves the state machine to a new state, firing the caller's
@@ -488,20 +499,16 @@ func (s *Session) transition(to State, d Diagnostic, err error) {
 	from := s.state
 	s.state, s.diag = to, d
 	s.log.Info("state transition", "from", from, "to", to, "diagnostic", d)
-	if h := s.cfg.OnStateChange; h != nil {
-		h(s, from, to)
+	if s.cfg.OnStateChange != nil {
+		s.cfg.OnStateChange(s, from, to)
 	}
 
-	if from == StateUp {
-		if h := s.cfg.OnDown; h != nil {
-			h(s, d, s.remoteState, err)
-		}
+	if from == StateUp && s.cfg.OnDown != nil {
+		s.cfg.OnDown(s, d, s.remoteState, err)
 	}
 
-	if to == StateUp {
-		if h := s.cfg.OnUp; h != nil {
-			h(s)
-		}
+	if to == StateUp && s.cfg.OnUp != nil {
+		s.cfg.OnUp(s)
 	}
 }
 
@@ -522,18 +529,25 @@ func (s *Session) transmit(final bool) {
 
 	// Seal the packet: for Simple Password this is only attaching the
 	// password section (RFC 5880, section 6.7.2), which the codec emits.
-	if a := s.cfg.Auth; a != nil {
-		p.Auth = &AuthSection{Type: a.Type, KeyID: a.KeyID, Data: a.Key}
+	if s.cfg.Auth != nil {
+		p.Auth = &AuthSection{
+			Type:  s.cfg.Auth.Type,
+			KeyID: s.cfg.Auth.KeyID,
+			Data:  s.cfg.Auth.Key,
+		}
 	}
 
 	b, err := p.AppendBinary(s.wb[:0])
 	if err != nil {
-		s.log.Debug("failed to marshal packet", "err", err)
+		if s.log.Enabled(context.Background(), slog.LevelDebug) {
+			s.log.Debug("failed to marshal packet", "err", err)
+		}
+
 		return
 	}
 
 	s.wb = b
-	if err := s.t.WritePacket(b); err != nil {
+	if err := s.t.WritePacket(b); err != nil && s.log.Enabled(context.Background(), slog.LevelDebug) {
 		s.log.Debug("failed to write packet", "err", err)
 	}
 }
@@ -561,11 +575,10 @@ func (s *Session) txIntervalBase() time.Duration {
 // 75-90% when a single packet is the whole detection budget (RFC 5880,
 // section 6.8.7).
 func (s *Session) txInterval() time.Duration {
-	iv := s.txIntervalBase()
 	span := 0.25
 	if s.cfg.DetectMultiplier == 1 {
 		span = 0.15
 	}
 
-	return time.Duration(float64(iv) * (0.75 + span*s.jitter()))
+	return time.Duration(float64(s.txIntervalBase()) * (0.75 + span*s.jitter()))
 }

@@ -2,6 +2,7 @@ package bfd
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -88,14 +89,19 @@ func ListenUDP(local netip.Addr, c ListenConfig) (*Listener, error) {
 			return nil, fmt.Errorf("bfd: failed to request TTLs: %w", err)
 		}
 
-		l.read = func(b []byte) (int, net.Addr, int, error) {
+		l.read = func(b []byte) (received, error) {
 			n, cm, src, err := p.ReadFrom(b)
-			ttl := -1
-			if cm != nil {
-				ttl = cm.TTL
+			r := received{
+				n:   n,
+				src: src,
+				ttl: -1,
 			}
 
-			return n, src, ttl, err
+			if cm != nil {
+				r.ttl = cm.TTL
+			}
+
+			return r, err
 		}
 	} else {
 		p := ipv6.NewPacketConn(rx)
@@ -104,21 +110,34 @@ func ListenUDP(local netip.Addr, c ListenConfig) (*Listener, error) {
 			return nil, fmt.Errorf("bfd: failed to request hop limits: %w", err)
 		}
 
-		l.read = func(b []byte) (int, net.Addr, int, error) {
+		l.read = func(b []byte) (received, error) {
 			n, cm, src, err := p.ReadFrom(b)
-			hl := -1
-			if cm != nil {
-				hl = cm.HopLimit
+			r := received{
+				n:   n,
+				src: src,
+				ttl: -1,
 			}
 
-			return n, src, hl, err
+			if cm != nil {
+				r.ttl = cm.HopLimit
+			}
+
+			return r, err
 		}
 	}
 
-	l.wg.Add(1)
-	go l.serve()
+	l.wg.Go(l.serve)
 
 	return l, nil
+}
+
+// A received is what the shared socket reports of one datagram read into
+// the listener's buffer: its length, its source, and its TTL or hop limit,
+// or -1 when the kernel reported none.
+type received struct {
+	n   int
+	src net.Addr
+	ttl int
 }
 
 // A Listener shares one local address among many single-hop BFD sessions.
@@ -148,7 +167,7 @@ type Listener struct {
 	// it with the source address and TTL or hop limit the RFC 5881,
 	// section 5 checks need.
 	rx   *net.UDPConn
-	read func(b []byte) (int, net.Addr, int, error)
+	read func(b []byte) (received, error)
 
 	// done is closed when the read goroutine exits, with readErr holding
 	// the error which ended it: the terminal error every open transport
@@ -298,20 +317,18 @@ func (l *Listener) close() error {
 // one buffer and routed below the Transport seam. Its exit is terminal for
 // every session on the listener.
 func (l *Listener) serve() {
-	defer l.wg.Done()
-
 	// Larger than any valid packet, so an oversized datagram is read whole
 	// and rejected by a session's parse rather than silently truncated.
 	buf := make([]byte, 4096)
 	for {
-		n, src, ttl, err := l.read(buf)
+		r, err := l.read(buf)
 		if err != nil {
 			l.readErr = err
 			close(l.done)
 			return
 		}
 
-		l.route(buf[:n], src, ttl)
+		l.route(buf[:r.n], r.src, r.ttl)
 	}
 }
 
@@ -321,7 +338,10 @@ func (l *Listener) serve() {
 func (l *Listener) route(b []byte, src net.Addr, ttl int) {
 	from, ok := sourceKey(src)
 	if !ok {
-		l.log.Debug("dropped datagram: source is not a UDP address", "src", src)
+		if l.log.Enabled(context.Background(), slog.LevelDebug) {
+			l.log.Debug("dropped datagram: source is not a UDP address", "src", src)
+		}
+
 		return
 	}
 
@@ -336,7 +356,10 @@ func (l *Listener) route(b []byte, src net.Addr, ttl int) {
 
 	t := l.lookup(yourDiscr, from)
 	if t == nil {
-		l.log.Debug("dropped datagram: no session", "src", from, "your_discr", yourDiscr)
+		if l.log.Enabled(context.Background(), slog.LevelDebug) {
+			l.log.Debug("dropped datagram: no session", "src", from, "your_discr", yourDiscr)
+		}
+
 		return
 	}
 
@@ -344,10 +367,18 @@ func (l *Listener) route(b []byte, src net.Addr, ttl int) {
 	// A full queue drops rather than stalling the listener and every other
 	// session behind one slow reader: BFD is lossy by design and the
 	// detection timer covers the loss.
+	d := datagram{
+		b:   bytes.Clone(b),
+		src: from,
+		ttl: ttl,
+	}
+
 	select {
-	case t.packets <- datagram{b: bytes.Clone(b), src: from, ttl: ttl}:
+	case t.packets <- d:
 	default:
-		l.log.Debug("dropped datagram: the session's queue is full", "peer", t.peer)
+		if l.log.Enabled(context.Background(), slog.LevelDebug) {
+			l.log.Debug("dropped datagram: the session's queue is full", "peer", t.peer)
+		}
 	}
 }
 
@@ -387,6 +418,35 @@ func (l *Listener) remove(t *listenerTransport) {
 	if t.discr != 0 && l.discrs[t.discr] == t {
 		delete(l.discrs, t.discr)
 	}
+}
+
+// register records discr as t's local discriminator in the discriminator
+// table, once. A transport already unregistered, or one which already
+// registered, is left alone.
+func (l *Listener) register(t *listenerTransport, discr uint32) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if t.removed || t.discr != 0 {
+		return
+	}
+
+	if other, ok := l.discrs[discr]; ok && other != t {
+		// Two sessions on one listener drew the same random
+		// discriminator. The incumbent keeps it, and this session's
+		// datagrams reach the incumbent and die on its source check, so
+		// the session never comes up. A collision is a 1 in 2^32 draw and
+		// a redial resolves it. Every write retries the registration, so
+		// this logs once per packet.
+		if l.log.Enabled(context.Background(), slog.LevelDebug) {
+			l.log.Debug("discriminator collision", "peer", t.peer, "discr", discr)
+		}
+
+		return
+	}
+
+	l.discrs[discr] = t
+	t.discr = discr
 }
 
 // A datagram is one routed datagram waiting for its session to read it:
@@ -465,30 +525,9 @@ func (t *listenerTransport) learn(b []byte) {
 		return
 	}
 
-	discr := binary.BigEndian.Uint32(b[4:8])
-	if discr == 0 {
-		return
+	if discr := binary.BigEndian.Uint32(b[4:8]); discr != 0 {
+		t.l.register(t, discr)
 	}
-
-	t.l.mu.Lock()
-	defer t.l.mu.Unlock()
-
-	if t.removed || t.discr != 0 {
-		return
-	}
-
-	if other, ok := t.l.discrs[discr]; ok && other != t {
-		// Two sessions on one listener drew the same random
-		// discriminator. The incumbent keeps it, and this session's
-		// datagrams reach the incumbent and die on its source check, so
-		// the session never comes up. A collision is a 1 in 2^32 draw and
-		// a redial resolves it.
-		t.l.log.Debug("discriminator collision", "peer", t.peer, "discr", discr)
-		return
-	}
-
-	t.l.discrs[discr] = t
-	t.discr = discr
 }
 
 // Close unregisters the session from the listener's routing, closes its
@@ -548,7 +587,10 @@ func DialUDP(local, peer netip.Addr) (Transport, error) {
 		return nil, err
 	}
 
-	return &dialTransport{Transport: t, l: l}, nil
+	return &dialTransport{
+		Transport: t,
+		l:         l,
+	}, nil
 }
 
 // A dialTransport is the sole session of a listener dialed for it alone.

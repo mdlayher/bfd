@@ -3,10 +3,12 @@ package bfd
 import (
 	"bytes"
 	"math"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 )
 
 func TestControlPacketRoundTrip(t *testing.T) {
@@ -322,9 +324,8 @@ func TestParseControlPacketErrors(t *testing.T) {
 	}
 }
 
-// TestControlPacketAuth covers the Simple Password Authentication Section:
-// its round trip, its exact wire encoding, and the marshal and parse checks
-// that guard it.
+// TestControlPacketAuthRoundTrip covers the Simple Password Authentication
+// Section's round trip across the password lengths the RFC allows.
 func TestControlPacketAuthRoundTrip(t *testing.T) {
 	t.Parallel()
 
@@ -334,15 +335,27 @@ func TestControlPacketAuthRoundTrip(t *testing.T) {
 	}{
 		{
 			name: "one byte password",
-			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("x")},
+			auth: &AuthSection{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 1,
+				Data:  []byte("x"),
+			},
 		},
 		{
 			name: "typical password",
-			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 7, Data: []byte("hunter2")},
+			auth: &AuthSection{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 7,
+				Data:  []byte("hunter2"),
+			},
 		},
 		{
 			name: "sixteen byte password",
-			auth: &AuthSection{Type: AuthTypeSimplePassword, KeyID: 255, Data: []byte("0123456789abcdef")},
+			auth: &AuthSection{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 255,
+				Data:  []byte("0123456789abcdef"),
+			},
 		},
 	}
 
@@ -380,7 +393,11 @@ func TestControlPacketAuthWireFormat(t *testing.T) {
 		YourDiscriminator: 0x05060708,
 		DesiredMinTX:      300 * time.Millisecond,
 		RequiredMinRX:     300 * time.Millisecond,
-		Auth:              &AuthSection{Type: AuthTypeSimplePassword, KeyID: 7, Data: []byte("hunter2")},
+		Auth: &AuthSection{
+			Type:  AuthTypeSimplePassword,
+			KeyID: 7,
+			Data:  []byte("hunter2"),
+		},
 	}
 
 	b, err := p.AppendBinary(nil)
@@ -425,11 +442,17 @@ func TestControlPacketAuthAppendBinaryErrors(t *testing.T) {
 		},
 		{
 			name: "oversize password",
-			auth: &AuthSection{Type: AuthTypeSimplePassword, Data: bytes.Repeat([]byte{'a'}, 17)},
+			auth: &AuthSection{
+				Type: AuthTypeSimplePassword,
+				Data: bytes.Repeat([]byte{'a'}, 17),
+			},
 		},
 		{
 			name: "unsupported type",
-			auth: &AuthSection{Type: AuthTypeKeyedSHA1, Data: bytes.Repeat([]byte{'a'}, 20)},
+			auth: &AuthSection{
+				Type: AuthTypeKeyedSHA1,
+				Data: bytes.Repeat([]byte{'a'}, 20),
+			},
 		},
 	}
 
@@ -453,7 +476,12 @@ func TestParseControlPacketAuthErrors(t *testing.T) {
 	// A valid simple password packet as the base for corruption.
 	base := func() []byte {
 		p := validPacket()
-		p.Auth = &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("hunter2")}
+		p.Auth = &AuthSection{
+			Type:  AuthTypeSimplePassword,
+			KeyID: 1,
+			Data:  []byte("hunter2"),
+		}
+
 		return must(p.AppendBinary(nil))
 	}
 
@@ -510,15 +538,32 @@ func TestStateString(t *testing.T) {
 		s    State
 		want string
 	}{
-		{s: StateAdminDown, want: "AdminDown"},
-		{s: StateDown, want: "Down"},
-		{s: StateInit, want: "Init"},
-		{s: StateUp, want: "Up"},
-		{s: State(0xff), want: "unknown(255)"},
+		{
+			s:    StateAdminDown,
+			want: "AdminDown",
+		},
+		{
+			s:    StateDown,
+			want: "Down",
+		},
+		{
+			s:    StateInit,
+			want: "Init",
+		},
+		{
+			s:    StateUp,
+			want: "Up",
+		},
+		{
+			s:    State(0xff),
+			want: "unknown(255)",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
+
 			if got := tt.s.String(); got != tt.want {
 				t.Fatalf("unexpected string: got %q, want %q", got, tt.want)
 			}
@@ -533,21 +578,56 @@ func TestDiagnosticString(t *testing.T) {
 		d    Diagnostic
 		want string
 	}{
-		{d: DiagNone, want: "No Diagnostic"},
-		{d: DiagControlDetectionTimeExpired, want: "Control Detection Time Expired"},
-		{d: DiagEchoFunctionFailed, want: "Echo Function Failed"},
-		{d: DiagNeighborSignaledSessionDown, want: "Neighbor Signaled Session Down"},
-		{d: DiagForwardingPlaneReset, want: "Forwarding Plane Reset"},
-		{d: DiagPathDown, want: "Path Down"},
-		{d: DiagConcatenatedPathDown, want: "Concatenated Path Down"},
-		{d: DiagAdministrativelyDown, want: "Administratively Down"},
-		{d: DiagReverseConcatenatedPathDown, want: "Reverse Concatenated Path Down"},
-		{d: DiagMisConnectivityDefect, want: "Mis-connectivity Defect"},
-		{d: Diagnostic(0xff), want: "unknown(255)"},
+		{
+			d:    DiagNone,
+			want: "No Diagnostic",
+		},
+		{
+			d:    DiagControlDetectionTimeExpired,
+			want: "Control Detection Time Expired",
+		},
+		{
+			d:    DiagEchoFunctionFailed,
+			want: "Echo Function Failed",
+		},
+		{
+			d:    DiagNeighborSignaledSessionDown,
+			want: "Neighbor Signaled Session Down",
+		},
+		{
+			d:    DiagForwardingPlaneReset,
+			want: "Forwarding Plane Reset",
+		},
+		{
+			d:    DiagPathDown,
+			want: "Path Down",
+		},
+		{
+			d:    DiagConcatenatedPathDown,
+			want: "Concatenated Path Down",
+		},
+		{
+			d:    DiagAdministrativelyDown,
+			want: "Administratively Down",
+		},
+		{
+			d:    DiagReverseConcatenatedPathDown,
+			want: "Reverse Concatenated Path Down",
+		},
+		{
+			d:    DiagMisConnectivityDefect,
+			want: "Mis-connectivity Defect",
+		},
+		{
+			d:    Diagnostic(0xff),
+			want: "unknown(255)",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.want, func(t *testing.T) {
+			t.Parallel()
+
 			if got := tt.d.String(); got != tt.want {
 				t.Fatalf("unexpected string: got %q, want %q", got, tt.want)
 			}
@@ -598,7 +678,11 @@ func FuzzParseControlPacket(f *testing.F) {
 			DetectMultiplier:  3,
 			MyDiscriminator:   5,
 			YourDiscriminator: 6,
-			Auth:              &AuthSection{Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("hunter2")},
+			Auth: &AuthSection{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 1,
+				Data:  []byte("hunter2"),
+			},
 		},
 	}
 
@@ -631,8 +715,8 @@ func FuzzParseControlPacket(f *testing.F) {
 			t.Fatalf("a parsed packet must re-marshal: %v", err)
 		}
 
-		if !bytes.Equal(b, b1) {
-			t.Fatalf("marshaling a parsed packet is not the identity:\n b:  %x\n b1: %x", b, b1)
+		if d := diff(t, b, b1); d != "" {
+			t.Fatalf("marshaling a parsed packet is not the identity (-want +got):\n%s", d)
 		}
 	})
 }
@@ -655,5 +739,12 @@ func validPacket() *ControlPacket {
 // equal.
 func diff[T any](tb testing.TB, want, got T) string {
 	tb.Helper()
-	return cmp.Diff(want, got)
+
+	return cmp.Diff(
+		want, got,
+		// An error matches its want by errors.Is, so a want names the
+		// sentinel or cause rather than the whole wrapped chain.
+		cmpopts.EquateErrors(),
+		cmp.Comparer(func(x, y netip.Addr) bool { return x == y }),
+	)
 }

@@ -4,24 +4,24 @@ package interop
 
 // The netns runtime hosts the FRR oracle: its daemons run in a nested
 // network namespace joined to the test's own namespace by a veth pair,
-// and everything works with unprivileged user namespaces — no root
+// and everything works with unprivileged user namespaces. No root is
 // required. It is a near-verbatim port of the runtime proven in
 // github.com/mdlayher/bgp's interop suite; the deltas are the daemon
-// list (bfdd beside zebra) and the version tripwire binary.
+// list, bfdd beside zebra, and the version tripwire binary.
 //
 // The test binary wears three hats, told apart by environment markers
 // in TestMain:
 //
 //  1. The process go test starts: nsReexec immediately re-executes it
-//     into a new user namespace (mapping the user to root) plus a
+//     into a new user namespace, mapping the user to root, plus a
 //     fresh network namespace for the harness network.
 //  2. The namespaced child: actually runs the tests. Each startFRR
 //     spawns hat three and speaks a two-line pipe protocol with it to
 //     hand over the veth peer.
-//  3. A per-instance init (nsInit): holds the oracle's fresh
-//     net+uts+mount namespaces — the kernel hostname pin, tmpfs over
-//     FRR's compiled-in state paths — and supervises the daemons,
-//     which die with it via parent-death signals.
+//  3. A per-instance init, nsInit: holds the oracle's fresh
+//     net+uts+mount namespaces, which carry the kernel hostname pin
+//     and tmpfs over FRR's compiled-in state paths, and supervises the
+//     daemons, which die with it via parent-death signals.
 
 import (
 	"bufio"
@@ -43,7 +43,7 @@ import (
 )
 
 // Environment variables wiring the runtime. envFRR is the daemon
-// directory — set by the user, or by TestMain from detectFRR; the rest
+// directory, set by the user or by TestMain from detectFRR. The rest
 // are internal plumbing for the re-executions described above.
 const (
 	envFRR     = "BFD_INTEROP_FRR"
@@ -67,9 +67,9 @@ var rt *nsRuntime
 
 // detectFRR locates the FRR daemons when $BFD_INTEROP_FRR does not
 // name them, returning "" when none are found. Distro packages install
-// the daemons off $PATH in a libexec-style directory, and vtysh —
-// which does land on $PATH — signposts a relocated install (Nix, the
-// dev shell, /usr/local) from its prefix.
+// the daemons off $PATH in a libexec-style directory. vtysh does land
+// on $PATH, and its prefix signposts a relocated install, such as Nix,
+// the dev shell, or /usr/local.
 func detectFRR() string {
 	candidates := []string{"/usr/lib/frr", "/usr/libexec/frr"}
 	if vtysh, err := exec.LookPath("vtysh"); err == nil {
@@ -87,6 +87,7 @@ func detectFRR() string {
 		if _, err := os.Stat(filepath.Join(dir, "zebra")); err != nil {
 			continue
 		}
+
 		if _, err := os.Stat(filepath.Join(dir, "bfdd")); err == nil {
 			return dir
 		}
@@ -105,21 +106,29 @@ func nsReexec() int {
 		Cloneflags: syscall.CLONE_NEWUSER | syscall.CLONE_NEWNET,
 		// Root inside the namespace is this user outside: enough to
 		// create veth pairs and nested namespaces, and nothing more.
-		UidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getuid(), Size: 1}},
-		GidMappings: []syscall.SysProcIDMap{{ContainerID: 0, HostID: os.Getgid(), Size: 1}},
+		UidMappings: []syscall.SysProcIDMap{{
+			ContainerID: 0,
+			HostID:      os.Getuid(),
+			Size:        1,
+		}},
+		GidMappings: []syscall.SysProcIDMap{{
+			ContainerID: 0,
+			HostID:      os.Getgid(),
+			Size:        1,
+		}},
 	}
 
 	err := cmd.Run()
-	var exit *exec.ExitError
-	switch {
-	case err == nil:
+	if err == nil {
 		return 0
-	case errors.As(err, &exit):
-		return exit.ExitCode()
-	default:
-		log.Printf("interop: failed to re-execute into a user namespace: %v", err)
-		return 1
 	}
+
+	if exit, ok := errors.AsType[*exec.ExitError](err); ok {
+		return exit.ExitCode()
+	}
+
+	log.Printf("interop: failed to re-execute into a user namespace: %v", err)
+	return 1
 }
 
 // An nsRuntime hosts FRR instances as daemons in nested namespaces.
@@ -140,8 +149,8 @@ func newNSRuntime() *nsRuntime {
 	}
 
 	// vtysh commonly lives apart from the daemons: alongside them, in
-	// the install's own bin (../../bin from e.g. libexec/frr), or on
-	// $PATH (/usr/bin for distro packages).
+	// the install's own bin, reached as ../../bin from a directory such
+	// as libexec/frr, or on $PATH, such as /usr/bin for distro packages.
 	var vtysh string
 	for _, c := range []string{
 		filepath.Join(dir, "vtysh"),
@@ -152,11 +161,13 @@ func newNSRuntime() *nsRuntime {
 			break
 		}
 	}
+
 	if vtysh == "" {
 		v, err := exec.LookPath("vtysh")
 		if err != nil {
 			log.Fatalf("interop: vtysh not found near $%s or on $PATH: %v", envFRR, err)
 		}
+
 		vtysh = v
 	}
 
@@ -166,6 +177,7 @@ func newNSRuntime() *nsRuntime {
 	if err != nil {
 		log.Fatalf("interop: failed to run bfdd --version: %v", err)
 	}
+
 	first, _, _ := strings.Cut(string(out), "\n")
 	if f := strings.Fields(first); len(f) < 3 || f[2] != frrVersion {
 		log.Fatalf("interop: the oracle must be FRR %s, but bfdd reports: %s", frrVersion, first)
@@ -177,12 +189,15 @@ func newNSRuntime() *nsRuntime {
 		log.Fatalf("interop: failed to bring up loopback: %v: %s", err, out)
 	}
 
-	return &nsRuntime{daemons: dir, vtysh: vtysh}
+	return &nsRuntime{
+		daemons: dir,
+		vtysh:   vtysh,
+	}
 }
 
 // startFRR starts one FRR oracle instance running the rendered
 // configuration conf by spawning an nsInit and wiring the veth pair to
-// it, registering teardown (including log capture) on t. It returns as
+// it, registering teardown on t, log capture included. It returns as
 // soon as the daemons exist; callers poll the handle for bfdd actually
 // answering.
 func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
@@ -195,6 +210,7 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 	if err != nil {
 		t.Fatalf("failed to create instance directory: %v", err)
 	}
+
 	t.Cleanup(func() { os.RemoveAll(run) })
 
 	// The instance's config directory: the rendered config plus
@@ -205,6 +221,7 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 	if err != nil {
 		t.Fatalf("failed to read vtysh.conf: %v", err)
 	}
+
 	for file, b := range map[string][]byte{"frr.conf": conf, "vtysh.conf": vtyshConf} {
 		if err := os.WriteFile(filepath.Join(etc, file), b, 0o644); err != nil {
 			t.Fatalf("failed to write %s: %v", file, err)
@@ -219,6 +236,7 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 	if err != nil {
 		t.Fatalf("failed to read /etc/group: %v", err)
 	}
+
 	if err := os.WriteFile(filepath.Join(run, "group"), append(group, "frrvty:x:0:\n"...), 0o644); err != nil {
 		t.Fatalf("failed to write group file: %v", err)
 	}
@@ -233,19 +251,23 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 	if err != nil {
 		t.Fatalf("failed to open init stdin: %v", err)
 	}
+
 	stdout, err := init.StdoutPipe()
 	if err != nil {
 		t.Fatalf("failed to open init stdout: %v", err)
 	}
+
 	initLog, err := os.Create(filepath.Join(run, "init.log"))
 	if err != nil {
 		t.Fatalf("failed to create init log: %v", err)
 	}
+
 	init.Stderr = initLog
 
 	if err := init.Start(); err != nil {
 		t.Fatalf("failed to start FRR init: %v", err)
 	}
+
 	t.Cleanup(func() {
 		// Logs first, while the instance still runs.
 		var logs bytes.Buffer
@@ -253,6 +275,7 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 			b, _ := os.ReadFile(filepath.Join(run, f))
 			fmt.Fprintf(&logs, "=== %s ===\n%s", f, b)
 		}
+
 		saveLogs(t, name, logs.Bytes())
 
 		// Closing stdin tells init to take the daemons down and
@@ -272,10 +295,12 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 			b, _ := os.ReadFile(filepath.Join(run, "init.log"))
 			t.Fatalf("FRR init never reported %q: %s", want, b)
 		}
+
 		if got := sc.Text(); got != want {
 			t.Fatalf("unexpected report from FRR init: got %q, want %q", got, want)
 		}
 	}
+
 	ipCmd := func(args ...string) {
 		t.Helper()
 		if out, err := exec.Command("ip", args...).CombinedOutput(); err != nil {
@@ -308,9 +333,11 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 		if zerr == nil && berr == nil {
 			break
 		}
+
 		if time.Now().After(deadline) {
 			t.Fatalf("timed out waiting for %s vty sockets", name)
 		}
+
 		time.Sleep(250 * time.Millisecond)
 	}
 
@@ -323,7 +350,11 @@ func (n *nsRuntime) startFRR(t *testing.T, name string, conf []byte) *nsFRR {
 		t.Fatalf("failed to load FRR config: %v: %s", err, out)
 	}
 
-	return &nsFRR{r: n, run: run, etc: etc}
+	return &nsFRR{
+		r:   n,
+		run: run,
+		etc: etc,
+	}
 }
 
 // An nsFRR drives vtysh against one instance's sockets.
@@ -333,10 +364,10 @@ type nsFRR struct {
 }
 
 // vtysh invokes vtysh against the instance's vty sockets with each
-// command as its own -c argument, returning stdout — joined by stderr
+// command as its own -c argument, returning stdout, joined by stderr
 // only on failure. vtysh retains mode across -c arguments, so nested
-// lines (configure terminal, then bfd, then peer statements) work as
-// they would interactively.
+// lines work as they would interactively: configure terminal, then
+// bfd, then peer statements.
 func (f *nsFRR) vtysh(cmds ...string) ([]byte, error) {
 	args := []string{"--vty_socket", f.run, "--config_dir", f.etc}
 	for _, cmd := range cmds {
@@ -367,18 +398,19 @@ func nsInit() {
 	}
 
 	run := os.Getenv(envNSRun)
-	daemons := os.Getenv(envFRR)
 
 	// Resolve iproute2 before the mounts below: masking /run breaks
-	// $PATH lookups on distros (NixOS) whose entries resolve through
-	// it.
+	// $PATH lookups on distros such as NixOS, whose entries resolve
+	// through it.
 	ipBin, err := exec.LookPath("ip")
 	if err == nil {
 		ipBin, err = filepath.EvalSymlinks(ipBin)
 	}
+
 	if err != nil {
 		fail("iproute2 unavailable: %v", err)
 	}
+
 	ipCmd := func(args ...string) {
 		if out, err := exec.Command(ipBin, args...).CombinedOutput(); err != nil {
 			fail("ip %s: %v: %s", strings.Join(args, " "), err, out)
@@ -392,19 +424,23 @@ func nsInit() {
 	if err := syscall.Sethostname([]byte(frrHostname)); err != nil {
 		fail("sethostname: %v", err)
 	}
+
 	if err := syscall.Mount("", "/", "", syscall.MS_REC|syscall.MS_PRIVATE, ""); err != nil {
 		fail("remounting / private: %v", err)
 	}
+
 	for _, dir := range []string{"/run", "/var/lib"} {
 		if err := syscall.Mount("tmpfs", dir, "tmpfs", 0, ""); err != nil {
 			fail("mounting tmpfs on %s: %v", dir, err)
 		}
 	}
+
 	for _, dir := range []string{"/run/frr", "/var/lib/frr"} {
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			fail("mkdir %s: %v", dir, err)
 		}
 	}
+
 	if err := syscall.Mount(filepath.Join(run, "group"), "/etc/group", "", syscall.MS_BIND, ""); err != nil {
 		fail("bind-mounting group file: %v", err)
 	}
@@ -430,7 +466,7 @@ func nsInit() {
 			fail("creating %s log: %v", name, err)
 		}
 
-		cmd := exec.Command(filepath.Join(daemons, name), append(
+		cmd := exec.Command(filepath.Join(os.Getenv(envFRR), name), append(
 			extra,
 			"--vty_socket", run,
 			"-i", "/run/frr/"+name+".pid",

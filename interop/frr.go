@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/netip"
 	"path/filepath"
+	"sync"
 	"testing"
 	"text/template"
 	"time"
@@ -15,15 +16,19 @@ import (
 
 // frrVersion pins the FRR oracle release, enforced against the
 // daemons' own reported version at startup. A silent oracle change
-// must never be observable as a test result — it would be
-// indistinguishable from a regression in this library — so upgrades
-// are deliberate bumps of this constant together with the nix flake
-// lock that supplies FRR to dev shells and CI.
+// must never be observable as a test result, since it would be
+// indistinguishable from a regression in this library. Upgrades are
+// therefore deliberate bumps of this constant together with the nix
+// flake lock that supplies FRR to dev shells and CI.
 const frrVersion = "10.7.0"
 
 // frrHostname pins the instance's kernel hostname via its UTS
 // namespace, keeping daemon logs stable across hosts.
 const frrHostname = "frr-interop"
+
+// instanceMu admits one FRR instance at a time: the harness network has
+// one fixed address pair and one veth pair, so instances cannot overlap.
+var instanceMu sync.Mutex
 
 // An frrConfig parameterizes testdata/frr/base.conf.tmpl.
 type frrConfig struct {
@@ -31,9 +36,9 @@ type frrConfig struct {
 	Peers     []frrPeer
 }
 
-// An frrKeyChain is a BFD authentication key chain. Only cleartext
-// (Simple Password) is modeled: the pinned FRR build has no other
-// algorithm compiled in.
+// An frrKeyChain is a BFD authentication key chain. Only cleartext,
+// which is Simple Password, is modeled: the pinned FRR build has no
+// other algorithm compiled in.
 type frrKeyChain struct {
 	// Name is the key chain's name, referenced by a peer's AuthKeyChain.
 	Name string
@@ -52,8 +57,7 @@ type frrPeer struct {
 
 	// Multiplier, RXMS, and TXMS fill the peer's detect-multiplier,
 	// receive-interval, and transmit-interval statements.
-	Multiplier int
-	RXMS, TXMS int
+	Multiplier, RXMS, TXMS int
 
 	// AuthKeyChain, when set, names the key chain the peer authenticates
 	// with. It must match an frrKeyChain in the same config.
@@ -64,8 +68,7 @@ type frrPeer struct {
 type frr struct {
 	// Addr and Addr6 are the instance's addresses: the peers of a
 	// library session running in the test binary.
-	Addr  netip.Addr
-	Addr6 netip.Addr
+	Addr, Addr6 netip.Addr
 
 	name string
 	vt   *nsFRR
@@ -75,6 +78,14 @@ type frr struct {
 // down when t ends. It returns once bfdd is answering vtysh.
 func startFRR(t *testing.T, cfg frrConfig) *frr {
 	t.Helper()
+
+	// The one-instance rule, enforced: every scenario starts here first,
+	// so holding instanceMu until t's cleanup serializes the parallel
+	// tests around the harness's fixed addresses and interface names.
+	// Registered first, the release runs last, after the instance and
+	// every session the test started have torn down.
+	instanceMu.Lock()
+	t.Cleanup(instanceMu.Unlock)
 
 	tmpl, err := template.ParseFiles(filepath.Join("testdata", "frr", "base.conf.tmpl"))
 	if err != nil {
@@ -146,10 +157,13 @@ type frrPeerJSON struct {
 
 	// Authentication is FRR's view of the session's authentication, present
 	// only when a key chain is configured on the peer.
-	Authentication struct {
-		Enabled    bool   `json:"enabled"`
-		CryptoName string `json:"cryptoName"`
-	} `json:"authentication"`
+	Authentication frrAuthJSON `json:"authentication"`
+}
+
+// An frrAuthJSON is FRR's view of one peer's authentication.
+type frrAuthJSON struct {
+	Enabled    bool   `json:"enabled"`
+	CryptoName string `json:"cryptoName"`
 }
 
 // peer fetches FRR's current view of the BFD peer at addr.
@@ -171,7 +185,7 @@ func (f *frr) peer(t *testing.T, addr netip.Addr) (frrPeerJSON, error) {
 }
 
 // awaitStatus polls until FRR reports the peer at addr with the given
-// session status ("up" or "down"), and returns that view.
+// session status, "up" or "down", and returns that view.
 func (f *frr) awaitStatus(t *testing.T, addr netip.Addr, status string) frrPeerJSON {
 	t.Helper()
 
@@ -186,9 +200,9 @@ func (f *frr) awaitStatus(t *testing.T, addr netip.Addr, status string) frrPeerJ
 }
 
 // configure applies configuration lines through vtysh, entering
-// configure terminal first; vtysh retains mode across -c arguments,
-// so nested lines (bfd, then peer statements) work as they would
-// interactively.
+// configure terminal first. vtysh retains mode across -c arguments,
+// so nested lines work as they would interactively: bfd, then peer
+// statements.
 func (f *frr) configure(t *testing.T, lines ...string) {
 	t.Helper()
 

@@ -17,16 +17,14 @@ func TestNewSessionDefaults(t *testing.T) {
 	tr, _ := memTransports()
 	s := must(NewSession(tr, Config{}))
 
-	if s.cfg.DesiredMinTX != defaultInterval {
-		t.Fatalf("unexpected DesiredMinTX: got %s, want %s", s.cfg.DesiredMinTX, defaultInterval)
+	want := Config{
+		DesiredMinTX:     defaultInterval,
+		RequiredMinRX:    defaultInterval,
+		DetectMultiplier: defaultDetectMultiplier,
 	}
 
-	if s.cfg.RequiredMinRX != defaultInterval {
-		t.Fatalf("unexpected RequiredMinRX: got %s, want %s", s.cfg.RequiredMinRX, defaultInterval)
-	}
-
-	if s.cfg.DetectMultiplier != defaultDetectMultiplier {
-		t.Fatalf("unexpected DetectMultiplier: got %d, want %d", s.cfg.DetectMultiplier, defaultDetectMultiplier)
+	if d := diff(t, want, s.cfg); d != "" {
+		t.Fatalf("unexpected defaulted config (-want +got):\n%s", d)
 	}
 
 	if s.LocalDiscriminator() == 0 {
@@ -48,12 +46,14 @@ func TestNewSessionDefaults(t *testing.T) {
 		RequiredMinRX: 100*time.Millisecond + 999*time.Nanosecond,
 	}))
 
-	if s.cfg.DesiredMinTX != 300*time.Millisecond {
-		t.Fatalf("DesiredMinTX was not truncated: %s", s.cfg.DesiredMinTX)
+	want = Config{
+		DesiredMinTX:     300 * time.Millisecond,
+		RequiredMinRX:    100 * time.Millisecond,
+		DetectMultiplier: defaultDetectMultiplier,
 	}
 
-	if s.cfg.RequiredMinRX != 100*time.Millisecond {
-		t.Fatalf("RequiredMinRX was not truncated: %s", s.cfg.RequiredMinRX)
+	if d := diff(t, want, s.cfg); d != "" {
+		t.Fatalf("intervals were not truncated (-want +got):\n%s", d)
 	}
 }
 
@@ -86,7 +86,10 @@ func TestNewSessionErrors(t *testing.T) {
 		},
 		{
 			name: "auth unsupported type",
-			cfg:  Config{Auth: &AuthConfig{Type: AuthTypeKeyedSHA1, Key: []byte("secret")}},
+			cfg: Config{Auth: &AuthConfig{
+				Type: AuthTypeKeyedSHA1,
+				Key:  []byte("secret"),
+			}},
 		},
 		{
 			name: "auth empty key",
@@ -94,7 +97,10 @@ func TestNewSessionErrors(t *testing.T) {
 		},
 		{
 			name: "auth oversize key",
-			cfg:  Config{Auth: &AuthConfig{Type: AuthTypeSimplePassword, Key: bytes.Repeat([]byte{'a'}, 17)}},
+			cfg: Config{Auth: &AuthConfig{
+				Type: AuthTypeSimplePassword,
+				Key:  bytes.Repeat([]byte{'a'}, 17),
+			}},
 		},
 	}
 
@@ -200,13 +206,21 @@ func TestSessionAuthSimplePassword(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		key := []byte("hunter2")
 		r := newSessionRig(t, Config{
-			Auth: &AuthConfig{Type: AuthTypeSimplePassword, KeyID: 3, Key: key},
+			Auth: &AuthConfig{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 3,
+				Key:   key,
+			},
 		})
 
 		// The session's own packets carry the configured password.
-		first := r.script.read()
-		want := &AuthSection{Type: AuthTypeSimplePassword, KeyID: 3, Data: key}
-		if d := diff(t, want, first.Auth); d != "" {
+		want := &AuthSection{
+			Type:  AuthTypeSimplePassword,
+			KeyID: 3,
+			Data:  key,
+		}
+
+		if d := diff(t, want, r.script.read().Auth); d != "" {
 			t.Fatalf("unexpected auth section (-want +got):\n%s", d)
 		}
 
@@ -228,13 +242,21 @@ func TestSessionAuthRejected(t *testing.T) {
 
 	synctest.Test(t, func(t *testing.T) {
 		r := newSessionRig(t, Config{
-			Auth: &AuthConfig{Type: AuthTypeSimplePassword, KeyID: 1, Key: []byte("correct")},
+			Auth: &AuthConfig{
+				Type:  AuthTypeSimplePassword,
+				KeyID: 1,
+				Key:   []byte("correct"),
+			},
 		})
 
 		// Wrong password: discarded.
-		r.script.writeAuth(StateDown, &AuthSection{
-			Type: AuthTypeSimplePassword, KeyID: 1, Data: []byte("wrong"),
-		}, true)
+		wrong := &AuthSection{
+			Type:  AuthTypeSimplePassword,
+			KeyID: 1,
+			Data:  []byte("wrong"),
+		}
+
+		r.script.writeAuth(StateDown, wrong, true)
 
 		// No section on a session that requires one: discarded.
 		open := r.script.packet(StateDown)
@@ -325,7 +347,11 @@ func TestSessionDetectionTimeExpired(t *testing.T) {
 
 		// The peer said nothing new: its last report was the Init which
 		// brought the session Up.
-		want := down{Diag: DiagControlDetectionTimeExpired, Remote: StateInit}
+		want := down{
+			Diag:   DiagControlDetectionTimeExpired,
+			Remote: StateInit,
+		}
+
 		if d := diff(t, want, recv(t, r.downC, "OnDown")); d != "" {
 			t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 		}
@@ -361,11 +387,17 @@ func TestSessionNeighborSignaledDown(t *testing.T) {
 		name  string
 		state State
 	}{
-		// The peer detected a forwarding failure and fell.
-		{name: "down", state: StateDown},
-		// The peer administratively shut BFD down: not a forwarding
-		// failure.
-		{name: "admin down", state: StateAdminDown},
+		{
+			// The peer detected a forwarding failure and fell.
+			name:  "down",
+			state: StateDown,
+		},
+		{
+			// The peer administratively shut BFD down: not a forwarding
+			// failure.
+			name:  "admin down",
+			state: StateAdminDown,
+		},
 	}
 
 	for _, tt := range tests {
@@ -379,7 +411,11 @@ func TestSessionNeighborSignaledDown(t *testing.T) {
 				r.script.write(r.script.packet(tt.state))
 				r.wantTransition(StateUp, StateDown)
 
-				want := down{Diag: DiagNeighborSignaledSessionDown, Remote: tt.state}
+				want := down{
+					Diag:   DiagNeighborSignaledSessionDown,
+					Remote: tt.state,
+				}
+
 				if d := diff(t, want, recv(t, r.downC, "OnDown")); d != "" {
 					t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 				}
@@ -591,7 +627,11 @@ func TestSessionCancelFarewell(t *testing.T) {
 
 		// The fall is local: the peer's last report was the Init which
 		// brought the session Up.
-		wantDown := down{Diag: DiagAdministrativelyDown, Remote: StateInit}
+		wantDown := down{
+			Diag:   DiagAdministrativelyDown,
+			Remote: StateInit,
+		}
+
 		if d := diff(t, wantDown, recv(t, r.downC, "OnDown")); d != "" {
 			t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 		}
@@ -671,17 +711,26 @@ func TestSessionTransportFailWhileUp(t *testing.T) {
 			OnUp: func(*Session) { upC <- struct{}{} },
 
 			OnDown: func(_ *Session, d Diagnostic, remote State, err error) {
-				downC <- down{Diag: d, Remote: remote, Err: err}
+				downC <- down{
+					Diag:   d,
+					Remote: remote,
+					Err:    err,
+				}
 			},
 
 			Logger: testLogger(t),
 		}))
+
 		s.jitter = func() float64 { return 1 }
 
 		runC := make(chan error, 1)
 		go func() { runC <- s.Run(context.Background()) }()
 
-		script := &script{tb: t, t: remote, discr: s.LocalDiscriminator()}
+		script := &script{
+			tb:    t,
+			t:     remote,
+			discr: s.LocalDiscriminator(),
+		}
 
 		p := script.packet(StateDown)
 		p.YourDiscriminator = 0
@@ -697,8 +746,15 @@ func TestSessionTransportFailWhileUp(t *testing.T) {
 		}
 
 		// The peer's last report was Init, which brought the session Up.
-		if d := recv(t, downC, "OnDown"); d.Diag != DiagNone || d.Remote != StateInit || !errors.Is(d.Err, readErr) {
-			t.Fatalf("unexpected OnDown: %+v", d)
+		// diff matches the error by errors.Is, through Run's wrapping.
+		want := down{
+			Diag:   DiagNone,
+			Remote: StateInit,
+			Err:    readErr,
+		}
+
+		if d := diff(t, want, recv(t, downC, "OnDown")); d != "" {
+			t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 		}
 	})
 }
@@ -729,11 +785,16 @@ func TestSessionPair(t *testing.T) {
 				OnUp: func(*Session) { e.upC <- struct{}{} },
 
 				OnDown: func(_ *Session, d Diagnostic, remote State, err error) {
-					e.downC <- down{Diag: d, Remote: remote, Err: err}
+					e.downC <- down{
+						Diag:   d,
+						Remote: remote,
+						Err:    err,
+					}
 				},
 
 				Logger: testLogger(t),
 			}))
+
 			s.jitter = func() float64 { return 1 }
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -752,14 +813,21 @@ func TestSessionPair(t *testing.T) {
 			t.Fatalf("unexpected session A Run error: %v", err)
 		}
 
-		// A's own cancellation is a Down to A as well, administrative.
+		// A's own cancellation is a Down to A as well, administrative. The
+		// fields are checked one by one because Remote is deliberately left
+		// out: whether A last heard B's Init or B's Up depends on how the
+		// two handshakes interleaved.
 		if d := recv(t, a.downC, "session A OnDown"); d.Diag != DiagAdministrativelyDown || d.Err != nil {
 			t.Fatalf("unexpected session A OnDown: %+v", d)
 		}
 
 		// A's farewell reaches B as AdminDown: neighbor signaled, not
 		// detection, and B sees the peer's AdminDown.
-		want := down{Diag: DiagNeighborSignaledSessionDown, Remote: StateAdminDown}
+		want := down{
+			Diag:   DiagNeighborSignaledSessionDown,
+			Remote: StateAdminDown,
+		}
+
 		if d := diff(t, want, recv(t, b.downC, "session B OnDown")); d != "" {
 			t.Fatalf("unexpected session B OnDown (-want +got):\n%s", d)
 		}

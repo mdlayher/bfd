@@ -140,6 +140,7 @@ func Example_sharedListener() {
 	if err != nil {
 		log.Fatalf("failed to listen: %v", err)
 	}
+
 	defer func() { _ = l.Close() }()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt)

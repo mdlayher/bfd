@@ -29,8 +29,22 @@ const scriptDiscr uint32 = 0xbfdbfd
 func memTransports() (a, b *memTransport) {
 	ab := make(chan []byte, 64)
 	ba := make(chan []byte, 64)
-	return &memTransport{in: ba, out: ab, errC: make(chan error, 1), done: make(chan struct{})},
-		&memTransport{in: ab, out: ba, errC: make(chan error, 1), done: make(chan struct{})}
+
+	a = &memTransport{
+		in:   ba,
+		out:  ab,
+		errC: make(chan error, 1),
+		done: make(chan struct{}),
+	}
+
+	b = &memTransport{
+		in:   ab,
+		out:  ba,
+		errC: make(chan error, 1),
+		done: make(chan struct{}),
+	}
+
+	return a, b
 }
 
 // A memTransport is one end of an in-memory packet pipe: each channel value
@@ -102,7 +116,6 @@ type down struct {
 // deterministic.
 type sessionRig struct {
 	tb     testing.TB
-	s      *Session
 	local  *memTransport
 	script *script
 	cancel context.CancelFunc
@@ -135,14 +148,23 @@ func newSessionRig(tb testing.TB, cfg Config) *sessionRig {
 	}
 
 	cfg.OnDown = func(s *Session, d Diagnostic, remote State, err error) {
-		r.downC <- down{Diag: d, Remote: remote, Err: err}
+		r.downC <- down{
+			Diag:   d,
+			Remote: remote,
+			Err:    err,
+		}
+
 		if userDown != nil {
 			userDown(s, d, remote, err)
 		}
 	}
 
 	cfg.OnStateChange = func(s *Session, from, to State) {
-		r.stateC <- stateChange{From: from, To: to}
+		r.stateC <- stateChange{
+			From: from,
+			To:   to,
+		}
+
 		if userState != nil {
 			userState(s, from, to)
 		}
@@ -156,10 +178,14 @@ func newSessionRig(tb testing.TB, cfg Config) *sessionRig {
 	tb.Cleanup(func() { _ = remote.Close() })
 
 	s := must(NewSession(local, cfg))
+
 	s.jitter = func() float64 { return 1 }
-	r.s = s
 	r.local = local
-	r.script = &script{tb: tb, t: remote, discr: s.LocalDiscriminator()}
+	r.script = &script{
+		tb:    tb,
+		t:     remote,
+		discr: s.LocalDiscriminator(),
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.cancel = cancel
@@ -196,8 +222,12 @@ func (r *sessionRig) up() {
 func (r *sessionRig) wantTransition(from, to State) {
 	r.tb.Helper()
 
-	got := recv(r.tb, r.stateC, "a state transition")
-	if d := diff(r.tb, stateChange{From: from, To: to}, got); d != "" {
+	want := stateChange{
+		From: from,
+		To:   to,
+	}
+
+	if d := diff(r.tb, want, recv(r.tb, r.stateC, "a state transition")); d != "" {
 		r.tb.Fatalf("unexpected state transition (-want +got):\n%s", d)
 	}
 }

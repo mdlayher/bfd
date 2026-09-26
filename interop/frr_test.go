@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/mdlayher/bfd"
 )
 
@@ -31,8 +33,17 @@ var (
 // library put on the wire: our discriminator, our multiplier, and our
 // negotiated intervals.
 
-func TestFRRUpIPv4(t *testing.T) { testFRRUp(t, false) }
-func TestFRRUpIPv6(t *testing.T) { testFRRUp(t, true) }
+func TestFRRUpIPv4(t *testing.T) {
+	t.Parallel()
+
+	testFRRUp(t, false)
+}
+
+func TestFRRUpIPv6(t *testing.T) {
+	t.Parallel()
+
+	testFRRUp(t, true)
+}
 
 func testFRRUp(t *testing.T, v6 bool) {
 	f, host := startFRRPeer(t, v6)
@@ -42,8 +53,8 @@ func testFRRUp(t *testing.T, v6 bool) {
 		peer = f.Addr6
 	}
 
-	s, upC, _ := runSession(t, host, peer)
-	await(t, upC, "OnUp")
+	ls := runSession(t, host, peer)
+	await(t, ls.upC, "OnUp")
 
 	// FRR's view of us: the remote-* fields echo our wire values. FRR
 	// reaches up on our last pre-Up packet, whose transmit desire still
@@ -57,7 +68,7 @@ func testFRRUp(t *testing.T, v6 bool) {
 		return err == nil && p.Status == "up" && p.RemoteTransmitInterval == intervalMS
 	})
 
-	if got, want := p.RemoteID, s.LocalDiscriminator(); got != want {
+	if got, want := p.RemoteID, ls.s.LocalDiscriminator(); got != want {
 		t.Errorf("FRR reports unexpected remote discriminator: got %d, want %d", got, want)
 	}
 
@@ -78,16 +89,24 @@ func testFRRUp(t *testing.T, v6 bool) {
 // AdminDown, so the oracle records a deliberate goodbye rather than
 // waiting out its detection time.
 func TestFRRCancelFarewell(t *testing.T) {
+	t.Parallel()
+
 	f, host := startFRRPeer(t, false)
 
-	_, upC, downC, cancel := runSessionCancel(t, host, f.Addr)
-	await(t, upC, "OnUp")
+	ls := runSession(t, host, f.Addr)
+	await(t, ls.upC, "OnUp")
 	f.awaitStatus(t, host, "up")
 
-	cancel()
-	d := await(t, downC, "OnDown")
-	if d.Diag != bfd.DiagAdministrativelyDown || d.Err != nil {
-		t.Fatalf("unexpected OnDown: %+v", d)
+	ls.cancel()
+
+	// The fall is local: the peer's last report was its own Up.
+	want := sessionDown{
+		Diag:   bfd.DiagAdministrativelyDown,
+		Remote: bfd.StateUp,
+	}
+
+	if d := diff(t, want, await(t, ls.downC, "OnDown")); d != "" {
+		t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 	}
 
 	// The farewell reaches FRR as our AdminDown: its session falls
@@ -105,21 +124,27 @@ func TestFRRCancelFarewell(t *testing.T) {
 // second handshake and a second OnUp, the perpetual session against a real
 // implementation.
 func TestFRRNeighborAdminDown(t *testing.T) {
+	t.Parallel()
+
 	f, host := startFRRPeer(t, false)
 
-	_, upC, downC := runSession(t, host, f.Addr)
-	await(t, upC, "OnUp")
+	ls := runSession(t, host, f.Addr)
+	await(t, ls.upC, "OnUp")
 
 	peerCmd := "peer " + host.String() + " local-address " + f.Addr.String()
 	f.configure(t, "bfd", peerCmd, "shutdown")
 
-	d := await(t, downC, "OnDown")
-	if d.Diag != bfd.DiagNeighborSignaledSessionDown || d.Remote != bfd.StateAdminDown || d.Err != nil {
-		t.Fatalf("unexpected OnDown: %+v", d)
+	want := sessionDown{
+		Diag:   bfd.DiagNeighborSignaledSessionDown,
+		Remote: bfd.StateAdminDown,
+	}
+
+	if d := diff(t, want, await(t, ls.downC, "OnDown")); d != "" {
+		t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 	}
 
 	f.configure(t, "bfd", peerCmd, "no shutdown")
-	await(t, upC, "a second OnUp")
+	await(t, ls.upC, "a second OnUp")
 	f.awaitStatus(t, host, "up")
 }
 
@@ -127,16 +152,24 @@ func TestFRRNeighborAdminDown(t *testing.T) {
 // directions without any farewell, so each side must time the other
 // out; restoring it brings both back Up.
 func TestFRRDetectionExpired(t *testing.T) {
+	t.Parallel()
+
 	f, host := startFRRPeer(t, false)
 
-	_, upC, downC := runSession(t, host, f.Addr)
-	await(t, upC, "OnUp")
+	ls := runSession(t, host, f.Addr)
+	await(t, ls.upC, "OnUp")
 	f.awaitStatus(t, host, "up")
 
 	linkSet(t, "down")
-	d := await(t, downC, "OnDown")
-	if d.Diag != bfd.DiagControlDetectionTimeExpired || d.Err != nil {
-		t.Fatalf("unexpected OnDown: %+v", d)
+
+	// The peer said nothing new: its last report was its own Up.
+	want := sessionDown{
+		Diag:   bfd.DiagControlDetectionTimeExpired,
+		Remote: bfd.StateUp,
+	}
+
+	if d := diff(t, want, await(t, ls.downC, "OnDown")); d != "" {
+		t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 	}
 
 	// The oracle timed us out too. Its diagnostic must be checked
@@ -147,7 +180,7 @@ func TestFRRDetectionExpired(t *testing.T) {
 	}
 
 	linkSet(t, "up")
-	await(t, upC, "a second OnUp")
+	await(t, ls.upC, "a second OnUp")
 	f.awaitStatus(t, host, "up")
 }
 
@@ -158,17 +191,19 @@ func TestFRRDetectionExpired(t *testing.T) {
 // exactly once before it self-heals. Hold for several detection times
 // and require silence from OnDown, with FRR still up at the end.
 func TestFRRHoldAfterUp(t *testing.T) {
+	t.Parallel()
+
 	f, host := startFRRPeer(t, false)
 
-	_, upC, downC := runSession(t, host, f.Addr)
-	await(t, upC, "OnUp")
+	ls := runSession(t, host, f.Addr)
+	await(t, ls.upC, "OnUp")
 	f.awaitStatus(t, host, "up")
 
 	// An absence has no signal to await, so the hold is wall-clock time
 	// against the oracle's real timers, sized at several detection
 	// times: the same documented exception as poll.
 	select {
-	case d := <-downC:
+	case d := <-ls.downC:
 		t.Fatalf("session flapped after reaching Up: %+v", d)
 	case <-time.After(4 * time.Second):
 	}
@@ -183,27 +218,30 @@ func TestFRRHoldAfterUp(t *testing.T) {
 // one of the two peers: see hostV4Alt for why a second FRR-side peer
 // would take a second instance.
 func TestFRRSharedListener(t *testing.T) {
+	t.Parallel()
+
 	f, host := startFRRPeer(t, false)
 
 	l, err := bfd.ListenUDP(host, bfd.ListenConfig{})
 	if err != nil {
 		t.Fatalf("failed to listen on %s: %v", host, err)
 	}
+
 	t.Cleanup(func() { _ = l.Close() })
 
-	oracle, oracleUp, _, _ := runTransport(t, dialListener(t, l, f.Addr))
-	_, siblingUp, _, _ := runTransport(t, dialListener(t, l, hostAddr4Alt))
-	_, farUp, _ := runSession(t, hostAddr4Alt, host)
+	oracle := runTransport(t, dialListener(t, l, f.Addr), nil)
+	sibling := runTransport(t, dialListener(t, l, hostAddr4Alt), nil)
+	far := runSession(t, hostAddr4Alt, host)
 
-	await(t, oracleUp, "OnUp against the oracle")
-	await(t, siblingUp, "OnUp on the sibling session")
-	await(t, farUp, "OnUp on the sibling's far end")
+	await(t, oracle.upC, "OnUp against the oracle")
+	await(t, sibling.upC, "OnUp on the sibling session")
+	await(t, far.upC, "OnUp on the sibling's far end")
 
 	// The oracle's own view is the proof its packets landed on its own
 	// session: the discriminator FRR learned is that session's, not the
 	// sibling's, and FRR would never have reached up without them.
 	p := f.awaitStatus(t, host, "up")
-	if got, want := p.RemoteID, oracle.LocalDiscriminator(); got != want {
+	if got, want := p.RemoteID, oracle.s.LocalDiscriminator(); got != want {
 		t.Errorf("FRR reports unexpected remote discriminator: got %d, want %d", got, want)
 	}
 }
@@ -232,29 +270,34 @@ func startFRRPeer(t *testing.T, v6 bool) (*frr, netip.Addr) {
 	return f, host
 }
 
-// A sessionDown is one OnDown invocation, delivered by runSession.
+// A sessionDown is one OnDown invocation, delivered by a libSession.
 type sessionDown struct {
 	Diag   bfd.Diagnostic
 	Remote bfd.State
 	Err    error
 }
 
-// runSession dials the RFC 5881 transport from local to peer and runs
-// a Session over it on a test-scoped goroutine, returning the Session
-// and channels delivering each OnUp and OnDown. Teardown cancels Run
-// and joins it when t ends.
-func runSession(t *testing.T, local, peer netip.Addr) (*bfd.Session, <-chan struct{}, <-chan sessionDown) {
-	t.Helper()
-
-	s, upC, downC, _ := runSessionCancel(t, local, peer)
-	return s, upC, downC
+// A libSession is a library Session running under test on a
+// test-scoped goroutine, with channels delivering each OnUp and OnDown
+// and Run's cancel function. Test cleanup still cancels and joins Run,
+// harmlessly, after a test's own cancellation.
+type libSession struct {
+	s      *bfd.Session
+	upC    <-chan struct{}
+	downC  <-chan sessionDown
+	cancel context.CancelFunc
 }
 
-// runSessionCancel is runSession, also returning the cancel function
-// of Run's context so lifecycle tests can end the session themselves.
-// Test cleanup still cancels and joins, harmlessly, after the test's
-// own cancellation.
-func runSessionCancel(t *testing.T, local, peer netip.Addr) (*bfd.Session, <-chan struct{}, <-chan sessionDown, context.CancelFunc) {
+// runSession dials the RFC 5881 transport from local to peer and runs an
+// unauthenticated Session over it.
+func runSession(t *testing.T, local, peer netip.Addr) *libSession {
+	t.Helper()
+
+	return runTransport(t, dialUDP(t, local, peer), nil)
+}
+
+// dialUDP dials the RFC 5881 transport from local to peer.
+func dialUDP(t *testing.T, local, peer netip.Addr) bfd.Transport {
 	t.Helper()
 
 	tr, err := bfd.DialUDP(local, peer)
@@ -262,7 +305,7 @@ func runSessionCancel(t *testing.T, local, peer netip.Addr) (*bfd.Session, <-cha
 		t.Fatalf("failed to dial transport: %v", err)
 	}
 
-	return runTransport(t, tr)
+	return tr
 }
 
 // dialListener builds one peer's Transport on a shared listener.
@@ -277,10 +320,9 @@ func dialListener(t *testing.T, l *bfd.Listener, peer netip.Addr) bfd.Transport 
 	return tr
 }
 
-// runTransport runs a Session over tr on a test-scoped goroutine,
-// returning the Session, channels delivering each OnUp and OnDown, and
-// Run's cancel function. Teardown cancels Run and joins it when t ends.
-func runTransport(t *testing.T, tr bfd.Transport) (*bfd.Session, <-chan struct{}, <-chan sessionDown, context.CancelFunc) {
+// runTransport runs a Session over tr, authenticated with auth when it is
+// non-nil. Teardown cancels Run and joins it when t ends.
+func runTransport(t *testing.T, tr bfd.Transport, auth *bfd.AuthConfig) *libSession {
 	t.Helper()
 
 	upC := make(chan struct{}, 4)
@@ -289,8 +331,14 @@ func runTransport(t *testing.T, tr bfd.Transport) (*bfd.Session, <-chan struct{}
 		OnUp: func(_ *bfd.Session) { upC <- struct{}{} },
 
 		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
-			downC <- sessionDown{Diag: d, Remote: remote, Err: err}
+			downC <- sessionDown{
+				Diag:   d,
+				Remote: remote,
+				Err:    err,
+			}
 		},
+
+		Auth: auth,
 	})
 	if err != nil {
 		_ = tr.Close()
@@ -305,12 +353,18 @@ func runTransport(t *testing.T, tr bfd.Transport) (*bfd.Session, <-chan struct{}
 			t.Logf("session run: %v", err)
 		}
 	}()
+
 	t.Cleanup(func() {
 		cancel()
 		<-done
 	})
 
-	return s, upC, downC, cancel
+	return &libSession{
+		s:      s,
+		upC:    upC,
+		downC:  downC,
+		cancel: cancel,
+	}
 }
 
 // linkSet flips the host side of the veth pair, severing or restoring
@@ -336,4 +390,13 @@ func await[T any](t *testing.T, ch <-chan T, what string) T {
 		t.Fatalf("timed out waiting for %s", what)
 		panic("unreachable")
 	}
+}
+
+// diff compares two values of the same static type, returning a non-empty,
+// human readable description of the difference when the values are not
+// equal. An error matches its want by errors.Is.
+func diff[T any](tb testing.TB, want, got T) string {
+	tb.Helper()
+
+	return cmp.Diff(want, got, cmpopts.EquateErrors())
 }
