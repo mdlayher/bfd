@@ -102,9 +102,12 @@ func runAuthSession(t *testing.T, local, peer netip.Addr, auth *bfd.AuthConfig) 
 	upC := make(chan struct{}, 4)
 	downC := make(chan sessionDown, 4)
 	s, err := bfd.NewSession(tr, bfd.Config{
-		Auth:   auth,
-		OnUp:   func(_ *bfd.Session) { upC <- struct{}{} },
-		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { downC <- sessionDown{Diag: d, Err: err} },
+		Auth: auth,
+		OnUp: func(_ *bfd.Session) { upC <- struct{}{} },
+
+		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+			downC <- sessionDown{Diag: d, Remote: remote, Err: err}
+		},
 	})
 	if err != nil {
 		_ = tr.Close()

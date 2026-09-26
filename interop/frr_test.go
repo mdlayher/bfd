@@ -100,8 +100,10 @@ func TestFRRCancelFarewell(t *testing.T) {
 
 // Scenario 3: the oracle signals down and comes back. FRR's shutdown
 // transmits AdminDown toward us, felling the session with the neighbor
-// diagnostic; no shutdown brings a second handshake and a second OnUp,
-// the perpetual session against a real implementation.
+// diagnostic and the peer's AdminDown, which RFC 5882, section 3.2 says a
+// client must not treat as a forwarding failure; no shutdown brings a
+// second handshake and a second OnUp, the perpetual session against a real
+// implementation.
 func TestFRRNeighborAdminDown(t *testing.T) {
 	f, host := startFRRPeer(t, false)
 
@@ -112,7 +114,7 @@ func TestFRRNeighborAdminDown(t *testing.T) {
 	f.configure(t, "bfd", peerCmd, "shutdown")
 
 	d := await(t, downC, "OnDown")
-	if d.Diag != bfd.DiagNeighborSignaledSessionDown || d.Err != nil {
+	if d.Diag != bfd.DiagNeighborSignaledSessionDown || d.Remote != bfd.StateAdminDown || d.Err != nil {
 		t.Fatalf("unexpected OnDown: %+v", d)
 	}
 
@@ -232,8 +234,9 @@ func startFRRPeer(t *testing.T, v6 bool) (*frr, netip.Addr) {
 
 // A sessionDown is one OnDown invocation, delivered by runSession.
 type sessionDown struct {
-	Diag bfd.Diagnostic
-	Err  error
+	Diag   bfd.Diagnostic
+	Remote bfd.State
+	Err    error
 }
 
 // runSession dials the RFC 5881 transport from local to peer and runs
@@ -283,8 +286,11 @@ func runTransport(t *testing.T, tr bfd.Transport) (*bfd.Session, <-chan struct{}
 	upC := make(chan struct{}, 4)
 	downC := make(chan sessionDown, 4)
 	s, err := bfd.NewSession(tr, bfd.Config{
-		OnUp:   func(_ *bfd.Session) { upC <- struct{}{} },
-		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { downC <- sessionDown{Diag: d, Err: err} },
+		OnUp: func(_ *bfd.Session) { upC <- struct{}{} },
+
+		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+			downC <- sessionDown{Diag: d, Remote: remote, Err: err}
+		},
 	})
 	if err != nil {
 		_ = tr.Close()

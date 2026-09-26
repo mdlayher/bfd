@@ -33,16 +33,25 @@ func Example() {
 			log.Println("up")
 		},
 
-		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) {
-			// The session fell from Up: withdraw routes and reset the
-			// protected protocol's session. Check err first: non-nil is
-			// the transport dying and Run returning. Otherwise d explains
-			// the fall, the session's own cancellation included as
-			// DiagAdministrativelyDown. Hooks run on the session
+		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+			// The session fell from Up. Hooks run on the session
 			// goroutine: blocking work belongs on another.
-			if err != nil {
+			switch {
+			case err != nil:
+				// The transport died and Run is returning: withdraw
+				// routes and reset the protected protocol's session.
 				log.Printf("down, transport failed: %v", err)
-			} else {
+			case remote == bfd.StateAdminDown:
+				// The peer administratively shut BFD down, such as by
+				// removing it from its configuration. RFC 5882, section
+				// 3.2: this is not a forwarding failure, so keep the
+				// protected protocol's session and its routes.
+				log.Printf("down, peer is administratively down: %v", d)
+			default:
+				// Any other fall is the down signal: withdraw routes and
+				// reset the protected protocol's session. d explains the
+				// fall, the session's own cancellation included as
+				// DiagAdministrativelyDown.
 				log.Printf("down: %v", d)
 			}
 		},
@@ -83,8 +92,11 @@ func Example_authentication() {
 	}
 
 	s, err := bfd.NewSession(t, bfd.Config{
-		OnUp:   func(_ *bfd.Session) { log.Println("up") },
-		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { log.Printf("down: %v %v", d, err) },
+		OnUp: func(_ *bfd.Session) { log.Println("up") },
+
+		OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+			log.Printf("down: %v %v %v", d, remote, err)
+		},
 
 		// The peer must agree on the type, key ID, and key. Like the rest
 		// of Config, Auth is immutable: rotating the key is a cancel and a
@@ -143,8 +155,12 @@ func Example_sharedListener() {
 		}
 
 		s, err := bfd.NewSession(t, bfd.Config{
-			OnUp:   func(_ *bfd.Session) { log.Printf("%s up", peer) },
-			OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { log.Printf("%s down: %v %v", peer, d, err) },
+			OnUp: func(_ *bfd.Session) { log.Printf("%s up", peer) },
+
+			OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+				log.Printf("%s down: %v %v %v", peer, d, remote, err)
+			},
+
 			Logger: slog.With("peer", peer),
 		})
 		if err != nil {
@@ -183,8 +199,11 @@ func Example_supervision() {
 			}
 
 			s, err := bfd.NewSession(t, bfd.Config{
-				OnUp:   func(_ *bfd.Session) { log.Println("up") },
-				OnDown: func(_ *bfd.Session, d bfd.Diagnostic, err error) { log.Printf("down: %v %v", d, err) },
+				OnUp: func(_ *bfd.Session) { log.Println("up") },
+
+				OnDown: func(_ *bfd.Session, d bfd.Diagnostic, remote bfd.State, err error) {
+					log.Printf("down: %v %v %v", d, remote, err)
+				},
 			})
 			if err != nil {
 				_ = t.Close()

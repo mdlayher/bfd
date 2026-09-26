@@ -90,8 +90,9 @@ type stateChange struct {
 
 // A down is one OnDown invocation, recorded by the rig.
 type down struct {
-	Diag Diagnostic
-	Err  error
+	Diag   Diagnostic
+	Remote State
+	Err    error
 }
 
 // A sessionRig runs one Session under test over an in-memory transport: its
@@ -133,10 +134,10 @@ func newSessionRig(tb testing.TB, cfg Config) *sessionRig {
 		}
 	}
 
-	cfg.OnDown = func(s *Session, d Diagnostic, err error) {
-		r.downC <- down{Diag: d, Err: err}
+	cfg.OnDown = func(s *Session, d Diagnostic, remote State, err error) {
+		r.downC <- down{Diag: d, Remote: remote, Err: err}
 		if userDown != nil {
-			userDown(s, d, err)
+			userDown(s, d, remote, err)
 		}
 	}
 

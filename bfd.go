@@ -373,11 +373,19 @@ func (p *ControlPacket) AppendBinary(b []byte) ([]byte, error) {
 // exactly one control packet: one UDP datagram's payload.
 //
 // Structural checks at least as strict as RFC 5880, section 6.8.6 are
-// applied: the version, length, detection time multiplier, and multipoint
-// bit. A packet with the Authentication Present bit carries its
-// Authentication Section in Auth. Checks which need session state, such
-// as discriminator matching and verifying the authentication, are the
-// session's.
+// applied:
+//
+//   - the version must be 1
+//   - the length field must match b, and b must be exactly 24 bytes
+//     without an Authentication Section
+//   - the detection time multiplier and My Discriminator must be nonzero
+//   - the multipoint bit must be clear
+//   - Poll and Final must not both be set
+//   - Your Discriminator may be zero only in the AdminDown and Down states
+//
+// A packet with the Authentication Present bit carries its Authentication
+// Section in Auth. Checks which need session state, such as discriminator
+// matching and verifying the authentication, are the session's.
 func ParseControlPacket(b []byte) (*ControlPacket, error) {
 	if len(b) < packetLen {
 		return nil, fmt.Errorf("bfd: control packet must be at least %d bytes: %d bytes", packetLen, len(b))

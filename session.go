@@ -30,8 +30,9 @@ const (
 
 // A Transport carries BFD control packets between two systems, one whole
 // packet per call in each direction: the seam between a Session and its
-// sockets. DialUDP builds the RFC 5881 single-hop UDP transport; callers
-// may supply their own, such as an in-memory pair for tests.
+// sockets. DialUDP and Listener.Dial build the RFC 5881 single-hop UDP
+// transport; callers may supply their own, such as an in-memory pair for
+// tests.
 //
 // ReadPacket blocks until a packet arrives, then fills b with exactly one
 // whole packet, never a fragment nor two coalesced. It must be unblocked
@@ -100,8 +101,22 @@ type Config struct {
 	// DiagAdministrativelyDown when cancellation ends a session that
 	// was Up.
 	//
+	// remote is the peer's state as it last reported it: the RFC 5880,
+	// section 6.8.1 bfd.RemoteSessionState. A fall on the peer's word
+	// carries DiagNeighborSignaledSessionDown with remote StateDown when
+	// the peer detected a failure, or StateAdminDown when the peer
+	// administratively shut the session down. Every other fall carries
+	// the state the peer reported while the session was Up, StateInit or
+	// StateUp, since the peer said nothing new.
+	//
+	// RFC 5882, section 3.2 requires that a fall with remote
+	// StateAdminDown is not treated as a forwarding failure. The peer
+	// withdrew BFD on purpose, and the path may be healthy. A client
+	// protecting a routing protocol should not tear the protocol session
+	// down for it, and should act on every other fall.
+	//
 	// See OnUp for the hook contract.
-	OnDown func(s *Session, d Diagnostic, err error)
+	OnDown func(s *Session, d Diagnostic, remote State, err error)
 
 	// OnStateChange, if set, observes every state transition, for metrics
 	// and diagnostics; session logic belongs on OnUp and OnDown. A
@@ -161,6 +176,7 @@ type Session struct {
 	// goroutine.
 	state                  State
 	diag                   Diagnostic
+	remoteState            State
 	remoteDiscr            uint32
 	remoteMinRX            time.Duration
 	remoteDesiredTX        time.Duration
@@ -223,8 +239,10 @@ func NewSession(t Transport, c Config) (*Session, error) {
 		jitter:     rand.Float64,
 		state:      StateDown,
 
-		// RFC 5880, section 6.8.1 initial values: the peer's receive
-		// requirement is 1µs until its first packet says otherwise.
+		// RFC 5880, section 6.8.1 initial values: the peer is Down and
+		// its receive requirement is 1µs until its first packet says
+		// otherwise.
+		remoteState: StateDown,
 		remoteMinRX: time.Microsecond,
 	}, nil
 }
@@ -390,11 +408,16 @@ func (s *Session) receive(p *ControlPacket, detectT *time.Timer) {
 		return
 	}
 
+	s.remoteState = p.State
 	s.remoteDiscr = p.MyDiscriminator
 	s.remoteMinRX = p.RequiredMinRX
 	s.remoteDesiredTX = p.DesiredMinTX
 	s.remoteDetectMultiplier = p.DetectMultiplier
 
+	// Both neighbor-signaled falls carry the same diagnostic, as RFC
+	// 5880, section 6.8.6 requires. OnDown tells them apart by
+	// remoteState, for the RFC 5882, section 3.2 rule that a peer's
+	// AdminDown is not a forwarding failure.
 	switch {
 	case p.State == StateAdminDown:
 		if s.state != StateDown {
@@ -454,9 +477,9 @@ func (s *Session) authenticated(p *ControlPacket) bool {
 }
 
 // transition moves the state machine to a new state, firing the caller's
-// hooks: OnStateChange always, OnUp entering Up, OnDown leaving it. err is
-// non-nil only for the terminal transport failure, where it carries the
-// reason no Diagnostic can.
+// hooks: OnStateChange always, OnUp entering Up, OnDown leaving it with the
+// peer's last reported state. err is non-nil only for the terminal
+// transport failure, where it carries the reason no Diagnostic can.
 func (s *Session) transition(to State, d Diagnostic, err error) {
 	if to == s.state {
 		return
@@ -471,7 +494,7 @@ func (s *Session) transition(to State, d Diagnostic, err error) {
 
 	if from == StateUp {
 		if h := s.cfg.OnDown; h != nil {
-			h(s, d, err)
+			h(s, d, s.remoteState, err)
 		}
 	}
 

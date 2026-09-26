@@ -3,21 +3,21 @@
 A Go library for Bidirectional Forwarding Detection (RFC 5880/5881):
 fast forwarding-path liveness between two systems, independent of the
 protocols routing over it: wire format, transport, and sessions.
-Single-hop asynchronous mode without authentication is the current
-scope: echo, demand mode, multihop (RFC 5883), and authentication may
-come later, and GTSM protects single-hop in the meantime. ListenUDP is
-the shared listener demultiplexing many sessions on one local address,
-one Transport per peer; DialUDP claims a local address's port outright
-and serves the one session on it. No import edge with any routing
-protocol package in either direction: the caller wires a down signal
-into its own protocol.
+Single-hop asynchronous mode is the current scope, with Simple Password
+authentication (RFC 5880, section 6.7.2) and GTSM (RFC 5881, section 5)
+protecting single-hop; echo, demand mode, and multihop (RFC 5883)
+remain out of scope. ListenUDP is the shared listener demultiplexing
+many sessions on one local address, one Transport per peer; DialUDP
+claims a local address's port outright and serves the one session on
+it. No import edge with any routing protocol package in either
+direction: the caller wires a down signal into its own protocol.
 
 ## Language
 
 **Control packet**:
 One BFD protocol unit on the wire (RFC 5880, section 4.1): the
-mandatory section, since authentication is unsupported. One UDP
-datagram carries exactly one.
+mandatory section, and an Authentication Section when the session is
+authenticated. One UDP datagram carries exactly one.
 
 **Discriminator**:
 A nonzero 32 bit value identifying one side's half of a session,
@@ -42,4 +42,16 @@ Poll bit answered by a Final bit.
 **Down signal**:
 A session's transition out of Up, delivered to the caller, who feeds
 it into the protocol the session protects — for BGP, a session reset
-carrying BFD Down (RFC 9384).
+carrying BFD Down (RFC 9384). A fall where the peer signaled
+AdminDown is the exception: RFC 5882, section 3.2 forbids treating it
+as a forwarding failure, so the caller keeps the protocol session.
+OnDown reports it by the remote state, StateAdminDown, beside
+DiagNeighborSignaledSessionDown.
+_Avoid_: reading DiagNeighborSignaledSessionDown alone as a failure; a
+peer's Down and AdminDown share it
+
+**Remote state**:
+The peer's session state as it last reported it, RFC 5880's
+bfd.RemoteSessionState. Down means the peer detected a failure;
+AdminDown means the peer withdrew BFD on purpose, the path possibly
+healthy.

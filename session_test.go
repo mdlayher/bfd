@@ -322,8 +322,12 @@ func TestSessionDetectionTimeExpired(t *testing.T) {
 		// multiplier of 10 and a 300ms cadence, so detection fires after
 		// exactly 3s.
 		start := time.Now()
-		if d := recv(t, r.downC, "OnDown"); d.Diag != DiagControlDetectionTimeExpired || d.Err != nil {
-			t.Fatalf("unexpected OnDown: %+v", d)
+
+		// The peer said nothing new: its last report was the Init which
+		// brought the session Up.
+		want := down{Diag: DiagControlDetectionTimeExpired, Remote: StateInit}
+		if d := diff(t, want, recv(t, r.downC, "OnDown")); d != "" {
+			t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 		}
 
 		if elapsed := time.Since(start); elapsed != 3*time.Second {
@@ -348,7 +352,8 @@ func TestSessionDetectionTimeExpired(t *testing.T) {
 
 // TestSessionNeighborSignaledDown verifies the transitions out of Up on the
 // peer's word: both Down and AdminDown fell the session with the neighbor
-// diagnostic.
+// diagnostic, locally and on the wire, and OnDown tells them apart by the
+// peer's state so a client can apply RFC 5882, section 3.2.
 func TestSessionNeighborSignaledDown(t *testing.T) {
 	t.Parallel()
 
@@ -356,7 +361,10 @@ func TestSessionNeighborSignaledDown(t *testing.T) {
 		name  string
 		state State
 	}{
+		// The peer detected a forwarding failure and fell.
 		{name: "down", state: StateDown},
+		// The peer administratively shut BFD down: not a forwarding
+		// failure.
 		{name: "admin down", state: StateAdminDown},
 	}
 
@@ -370,8 +378,14 @@ func TestSessionNeighborSignaledDown(t *testing.T) {
 
 				r.script.write(r.script.packet(tt.state))
 				r.wantTransition(StateUp, StateDown)
-				if d := recv(t, r.downC, "OnDown"); d.Diag != DiagNeighborSignaledSessionDown || d.Err != nil {
-					t.Fatalf("unexpected OnDown: %+v", d)
+
+				want := down{Diag: DiagNeighborSignaledSessionDown, Remote: tt.state}
+				if d := diff(t, want, recv(t, r.downC, "OnDown")); d != "" {
+					t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
+				}
+
+				if p := r.script.nextState(StateDown); p.Diagnostic != DiagNeighborSignaledSessionDown {
+					t.Fatalf("unexpected diagnostic on the wire: %s", p.Diagnostic)
 				}
 			})
 		})
@@ -575,8 +589,11 @@ func TestSessionCancelFarewell(t *testing.T) {
 		r.up()
 		r.cancel()
 
-		if d := recv(t, r.downC, "OnDown"); d.Diag != DiagAdministrativelyDown || d.Err != nil {
-			t.Fatalf("unexpected OnDown: %+v", d)
+		// The fall is local: the peer's last report was the Init which
+		// brought the session Up.
+		wantDown := down{Diag: DiagAdministrativelyDown, Remote: StateInit}
+		if d := diff(t, wantDown, recv(t, r.downC, "OnDown")); d != "" {
+			t.Fatalf("unexpected OnDown (-want +got):\n%s", d)
 		}
 
 		want := &ControlPacket{
@@ -651,8 +668,12 @@ func TestSessionTransportFailWhileUp(t *testing.T) {
 		)
 
 		s := must(NewSession(local, Config{
-			OnUp:   func(*Session) { upC <- struct{}{} },
-			OnDown: func(_ *Session, d Diagnostic, err error) { downC <- down{Diag: d, Err: err} },
+			OnUp: func(*Session) { upC <- struct{}{} },
+
+			OnDown: func(_ *Session, d Diagnostic, remote State, err error) {
+				downC <- down{Diag: d, Remote: remote, Err: err}
+			},
+
 			Logger: testLogger(t),
 		}))
 		s.jitter = func() float64 { return 1 }
@@ -675,7 +696,8 @@ func TestSessionTransportFailWhileUp(t *testing.T) {
 			t.Fatalf("expected the transport's read error, but got: %v", err)
 		}
 
-		if d := recv(t, downC, "OnDown"); d.Diag != DiagNone || !errors.Is(d.Err, readErr) {
+		// The peer's last report was Init, which brought the session Up.
+		if d := recv(t, downC, "OnDown"); d.Diag != DiagNone || d.Remote != StateInit || !errors.Is(d.Err, readErr) {
 			t.Fatalf("unexpected OnDown: %+v", d)
 		}
 	})
@@ -691,7 +713,7 @@ func TestSessionPair(t *testing.T) {
 		type end struct {
 			cancel context.CancelFunc
 			upC    chan struct{}
-			downC  chan Diagnostic
+			downC  chan down
 			runC   chan error
 		}
 
@@ -699,13 +721,17 @@ func TestSessionPair(t *testing.T) {
 		start := func(tr Transport) *end {
 			e := &end{
 				upC:   make(chan struct{}, 4),
-				downC: make(chan Diagnostic, 4),
+				downC: make(chan down, 4),
 				runC:  make(chan error, 1),
 			}
 
 			s := must(NewSession(tr, Config{
-				OnUp:   func(*Session) { e.upC <- struct{}{} },
-				OnDown: func(_ *Session, d Diagnostic, _ error) { e.downC <- d },
+				OnUp: func(*Session) { e.upC <- struct{}{} },
+
+				OnDown: func(_ *Session, d Diagnostic, remote State, err error) {
+					e.downC <- down{Diag: d, Remote: remote, Err: err}
+				},
+
 				Logger: testLogger(t),
 			}))
 			s.jitter = func() float64 { return 1 }
@@ -727,14 +753,15 @@ func TestSessionPair(t *testing.T) {
 		}
 
 		// A's own cancellation is a Down to A as well, administrative.
-		if d := recv(t, a.downC, "session A OnDown"); d != DiagAdministrativelyDown {
-			t.Fatalf("unexpected session A diagnostic: %s", d)
+		if d := recv(t, a.downC, "session A OnDown"); d.Diag != DiagAdministrativelyDown || d.Err != nil {
+			t.Fatalf("unexpected session A OnDown: %+v", d)
 		}
 
 		// A's farewell reaches B as AdminDown: neighbor signaled, not
-		// detection.
-		if d := recv(t, b.downC, "session B OnDown"); d != DiagNeighborSignaledSessionDown {
-			t.Fatalf("unexpected session B diagnostic: %s", d)
+		// detection, and B sees the peer's AdminDown.
+		want := down{Diag: DiagNeighborSignaledSessionDown, Remote: StateAdminDown}
+		if d := diff(t, want, recv(t, b.downC, "session B OnDown")); d != "" {
+			t.Fatalf("unexpected session B OnDown (-want +got):\n%s", d)
 		}
 
 		b.cancel()
